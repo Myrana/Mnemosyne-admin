@@ -62,7 +62,7 @@ const DISCORD_REDIRECT_URI = requireEnv("DISCORD_REDIRECT_URI");
 const DISCORD_GUILD_ID = requireEnv("DISCORD_GUILD_ID");
 const SESSION_SECRET = requireEnv("SESSION_SECRET");
 
-const BIRTHDAYS_TABLE = process.env.BIRTHDAYS_TABLE || "Birthdays";
+const BIRTHDAYS_TABLE = process.env.BIRTHDAYS_TABLE || "birthdays";
 
 // Admin roles allowed to use /admin routes (comma-separated role IDs)
 const ALLOWED_ROLE_IDS = (process.env.ALLOWED_ROLE_IDS || "")
