@@ -541,3 +541,17 @@ app.listen(PORT, () => {
   console.log(`[WEB] birthdays table env BIRTHDAYS_TABLE=${BIRTHDAYS_TABLE} (quoted as ${TBL})`);
 });
 
+app.get("/debug/birthdays", async (req, res) => {
+  try {
+    const a = await pool.query(`SELECT COUNT(*)::int AS count FROM ${BDAY_T}`);
+    const b = await pool.query(`SELECT user_id, character_name, month, day FROM ${BDAY_T} ORDER BY id DESC LIMIT 5`);
+    res.json({
+      table: BIRTHDAYS_TABLE,
+      count: a.rows[0].count,
+      sample: b.rows,
+      db: (process.env.DATABASE_URL || "").split("@")[1]?.split("/")[0] || "unknown",
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e), table: BIRTHDAYS_TABLE });
+  }
+});
