@@ -421,6 +421,7 @@ app.get("/me/birthdays", mustBeAuthed, async (req, res) => {
 app.post("/me/birthdays", mustBeAuthed, async (req, res) => {
   try {
     const userId = String(req.session.user.id);
+
     const character_name = cleanName(req.body.character_name);
     const mmdd = String(req.body.mmdd || "");
     const image_url = cleanName(req.body.image_url || "");
@@ -429,42 +430,32 @@ app.post("/me/birthdays", mustBeAuthed, async (req, res) => {
     if (!mmddValid(mmdd)) return res.status(400).send("Invalid mmdd (use MM-DD)");
 
     const [m, d] = mmdd.split("-").map((x) => Number(x));
-    if (!Number.isInteger(m) || m < 1 || m > 12) return res.status(400).send("Bad month");
-    if (!Number.isInteger(d) || d < 1 || d > 31) return res.status(400).send("Bad day");
 
-    // 1) Look for existing row (case-insensitive match on name)
-    const found = await pool.query(
-      `SELECT id
-       FROM ${TBL}
-       WHERE user_id = $1 AND lower(character_name) = lower($2)
-       LIMIT 1`,
-      [userId, character_name]
+    // ✅ DEFINE THIS (this is what your error is complaining about)
+    const character_name_key = cleanName(character_name).toLowerCase();
+
+    await pool.query(
+      `
+      INSERT INTO ${TBL} (user_id, character_name, character_name_key, month, day, image_url, updated_at)
+      VALUES ($1, $2, $3, $4, $5, NULLIF($6,''), now())
+      ON CONFLICT (user_id, character_name_key)
+      DO UPDATE SET
+        character_name = EXCLUDED.character_name,
+        month = EXCLUDED.month,
+        day = EXCLUDED.day,
+        image_url = EXCLUDED.image_url,
+        updated_at = now()
+      `,
+      [userId, character_name, character_name_key, m, d, image_url]
     );
 
-    if (found.rows.length) {
-      // 2) Update existing
-      const id = found.rows[0].id;
-      await pool.query(
-        `UPDATE ${TBL}
-         SET month=$1, day=$2, image_url=NULLIF($3,''), updated_at=now()
-         WHERE id=$4 AND user_id=$5`,
-        [m, d, image_url, id, userId]
-      );
-    } else {
-      // 3) Insert new
-      await pool.query(
-        `INSERT INTO ${TBL} (user_id, character_name, month, day, image_url, updated_at)
-         VALUES ($1, $2, $3, $4, NULLIF($5,''), now())`,
-        [userId, character_name, character_name_key, m, d, image_url]
-      );
-    }
-
-    return res.redirect("/me/birthdays");
+    res.redirect("/me/birthdays");
   } catch (e) {
     console.error("[ADD] failed:", e);
-    return res.status(500).send(`Add failed: ${escapeHtml(e.message)}`);
+    res.status(500).send(`Add failed: ${e.message}`);
   }
 });
+
 
 
 app.post("/me/birthdays/:id/edit", mustBeAuthed, async (req, res) => {
