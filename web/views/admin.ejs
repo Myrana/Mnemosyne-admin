@@ -1,0 +1,35 @@
+<% const body = `
+<h2>Admin Panel: All Birthdays</h2>
+
+<table>
+  <thead>
+    <tr><th>User ID</th><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr>
+  </thead>
+  <tbody>
+    ${rows.map(r => `
+      <tr>
+        <td>${r.user_id}</td>
+        <td>${r.character_name}</td>
+        <td>${String(r.month).padStart(2,'0')}-${String(r.day).padStart(2,'0')}</td>
+        <td>${r.image_url ? `<a href="${r.image_url}" target="_blank">link</a>` : ""}</td>
+        <td>
+          <form method="POST" action="/admin/birthdays/${r.id}/edit" style="margin-bottom:8px;">
+            <div class="row">
+              <input name="character_name" value="${r.character_name}" required />
+              <input name="month" value="${r.month}" required />
+              <input name="day" value="${r.day}" required />
+              <input name="image_url" value="${r.image_url || ""}" />
+              <button type="submit">Save</button>
+            </div>
+          </form>
+          <form method="POST" action="/admin/birthdays/${r.id}/delete" onsubmit="return confirm('Delete this birthday?');">
+            <button type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+    `).join("")}
+  </tbody>
+</table>
+`; %>
+
+<%- include("layout", { user, body }) %>
