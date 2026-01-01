@@ -1,33 +1,32 @@
 /**
- * index.js — Mnemosyne Web Admin (Railway) — FULL FILE
+ * index.js — Mnemosyne Admin (Railway) — FULL FILE (Option B)
  *
- * What this version fixes/does:
- * ✅ Works with table name: birthdays (lowercase)
- * ✅ Supports a NOT NULL character_name_key column (auto-computed)
- * ✅ Prevents duplicates via UNIQUE(user_id, character_name_key)
- * ✅ Discord OAuth without login loop (Postgres sessions + req.session.save)
- * ✅ Admin-only routes via ADMIN_ROLE_IDS (not your member id)
- * ✅ Per-user view/add/edit/delete
- * ✅ Admin view + search by username/global_name/user_id/character
- * ✅ Admin can add birthdays for ANY user (by searching users table)
+ * What this version does:
+ * - Discord OAuth login (no redirect loop)
+ * - Postgres-backed sessions (connect-pg-simple) with auto table creation
+ * - Birthdays CRUD
+ *   - /me/birthdays : user view/add/edit/delete (only their own rows)
+ *   - /admin/birthdays : admin view + admin add for ANY Discord user ID (Option B) + admin delete
+ *   - /admin/search : admin search by user_id or character_name
  *
- * REQUIRED ENV:
- *  DATABASE_URL
- *  DISCORD_CLIENT_ID
- *  DISCORD_CLIENT_SECRET
- *  DISCORD_REDIRECT_URI        e.g. https://YOURAPP.up.railway.app/callback
- *  DISCORD_GUILD_ID
- *  BOT_TOKEN                  (your Discord BOT token, used for member roles)
- *  SESSION_SECRET
+ * IMPORTANT (your schema):
+ * - Your "birthdays" table must have a NOT NULL "character_name_key".
+ *   This file ensures the column exists and backfills it from character_name.
  *
- * OPTIONAL ENV:
- *  ADMIN_ROLE_IDS             comma-separated role IDs (Discord role IDs) that count as admin
- *  BIRTHDAYS_TABLE            defaults to "birthdays"
- *  PORT                       defaults 3000
+ * ENV REQUIRED:
+ *   DATABASE_URL
+ *   DISCORD_CLIENT_ID
+ *   DISCORD_CLIENT_SECRET
+ *   DISCORD_REDIRECT_URI     e.g. https://YOUR-SERVICE.up.railway.app/callback
+ *   DISCORD_GUILD_ID
+ *   BOT_TOKEN               (Discord bot token; used to look up guild roles)
+ *   SESSION_SECRET
  *
- * Notes:
- * - This file creates/ensures tables: users, web_sessions, birthday_shouts, birthdays (if missing)
- * - If you already created birthdays in UI, it will not destroy data.
+ * OPTIONAL:
+ *   ADMIN_ROLE_IDS          comma-separated Discord role IDs that count as admin
+ *   BIRTHDAYS_TABLE         defaults "birthdays"
+ *   PORT                    defaults 3000
+ *   PGSSLMODE               set "disable" to disable ssl
  */
 
 import express from "express";
@@ -38,10 +37,9 @@ import crypto from "crypto";
 
 const { Pool } = pg;
 const PgSession = connectPgSimple(session);
-
 const app = express();
 
-// ---------- Env helpers ----------
+// ---------------- Env helpers ----------------
 function requireEnv(name) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing required env var: ${name}`);
@@ -60,25 +58,23 @@ const SESSION_SECRET = requireEnv("SESSION_SECRET");
 
 const BIRTHDAYS_TABLE = process.env.BIRTHDAYS_TABLE || "birthdays";
 
-// Admin role IDs (Discord role IDs, comma-separated)
 const ADMIN_ROLE_IDS = (process.env.ADMIN_ROLE_IDS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
-// ---------- Postgres ----------
+// ---------------- Postgres ----------------
 const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: process.env.PGSSLMODE === "disable" ? false : undefined,
 });
 
-// ---------- Middleware ----------
-app.set("trust proxy", 1); // Railway HTTPS proxy
+// ---------------- Express / Sessions ----------------
+app.set("trust proxy", 1); // needed on Railway for secure cookies behind proxy
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Postgres-backed sessions
 app.use(
   session({
     store: new PgSession({
@@ -92,14 +88,14 @@ app.use(
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: true, // Railway is HTTPS
+      secure: true, // Railway URL is https
       sameSite: "lax",
       maxAge: 1000 * 60 * 60 * 24 * 7,
     },
   })
 );
 
-// ---------- Utilities ----------
+// ---------------- Utilities ----------------
 function escapeHtml(s = "") {
   return String(s)
     .replaceAll("&", "&amp;")
@@ -109,17 +105,16 @@ function escapeHtml(s = "") {
     .replaceAll("'", "&#39;");
 }
 
-function randomState() {
-  return crypto.randomBytes(16).toString("hex");
-}
-
 function cleanName(name) {
   return String(name || "").replace(/\s+/g, " ").trim();
 }
 
-// IMPORTANT: this matches the not-null column that bit you
-function characterNameKey(name) {
+function charKey(name) {
   return cleanName(name).toLowerCase();
+}
+
+function randomState() {
+  return crypto.randomBytes(16).toString("hex");
 }
 
 function isAdminByRoles(roleIds) {
@@ -139,34 +134,25 @@ function mustBeAdmin(req, res, next) {
 }
 
 function mmddValid(mmdd) {
-  return /^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(mmdd);
+  return /^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(String(mmdd || ""));
+}
+
+function parseMmdd(mmdd) {
+  const [m, d] = String(mmdd).split("-").map((x) => Number(x));
+  return [m, d];
 }
 
 function tableIdent(name) {
-  // allow letters numbers underscore ONLY
+  // allow only safe identifiers to avoid injection via env
   if (!/^[A-Za-z0-9_]+$/.test(name)) throw new Error(`Unsafe table name: ${name}`);
   return `"${name}"`;
 }
 
 const TBL = tableIdent(BIRTHDAYS_TABLE);
 
-// ---------- Schema ensure ----------
+// ---------------- Schema ensure ----------------
 async function ensureSchema() {
-  // users table for username search + admin add-by-search
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      user_id TEXT PRIMARY KEY,
-      username TEXT,
-      discriminator TEXT,
-      global_name TEXT,
-      avatar TEXT,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS users_username_idx ON users (lower(username));`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS users_global_name_idx ON users (lower(global_name));`);
-
-  // shout dedupe table (optional but good)
+  // 1) Dedupe table (optional but harmless)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS birthday_shouts (
       shout_date date NOT NULL,
@@ -177,61 +163,68 @@ async function ensureSchema() {
     );
   `);
 
-  // birthdays table — includes character_name_key NOT NULL (this fixes your errors)
+  // 2) Birthdays table (create if missing)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ${TBL} (
       id SERIAL PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      character_name TEXT NOT NULL,
-      character_name_key TEXT NOT NULL,
-      month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
-      day INTEGER NOT NULL CHECK (day BETWEEN 1 AND 31),
-      image_url TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      user_id text NOT NULL,
+      character_name text NOT NULL,
+      character_name_key text NOT NULL,
+      month integer NOT NULL CHECK (month BETWEEN 1 AND 12),
+      day integer NOT NULL CHECK (day BETWEEN 1 AND 31),
+      image_url text,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
     );
   `);
 
-  // If your table already existed but was missing the key column, add it.
-  // If it already exists, harmless.
+  // 3) If table already existed without character_name_key, add it + backfill safely
+  //    Also ensures NOT NULL (only after backfill).
   await pool.query(`
-    ALTER TABLE ${TBL}
-    ADD COLUMN IF NOT EXISTS character_name_key TEXT;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='${BIRTHDAYS_TABLE}' AND column_name='character_name_key'
+      ) THEN
+        ALTER TABLE ${TBL} ADD COLUMN character_name_key text;
+      END IF;
+
+      -- Backfill any null/blank keys from character_name
+      UPDATE ${TBL}
+      SET character_name_key = lower(btrim(regexp_replace(coalesce(character_name,''), '\\s+', ' ', 'g')))
+      WHERE character_name_key IS NULL OR btrim(character_name_key) = '';
+
+      -- If still any nulls, don't force NOT NULL (would fail). Otherwise enforce.
+      IF NOT EXISTS (
+        SELECT 1 FROM ${TBL}
+        WHERE character_name_key IS NULL OR btrim(character_name_key) = ''
+      ) THEN
+        ALTER TABLE ${TBL} ALTER COLUMN character_name_key SET NOT NULL;
+      END IF;
+    END $$;
   `);
 
-  // backfill NULL keys if needed
-  await pool.query(`
-    UPDATE ${TBL}
-    SET character_name_key = lower(trim(regexp_replace(character_name, '\\s+', ' ', 'g')))
-    WHERE character_name_key IS NULL;
-  `);
-
-  // enforce NOT NULL (only after backfill)
-  await pool.query(`
-    ALTER TABLE ${TBL}
-    ALTER COLUMN character_name_key SET NOT NULL;
-  `);
-
-  // Unique dedupe: one per user + character_name_key
+  // 4) Unique index to support ON CONFLICT (user_id, character_name_key)
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS birthdays_user_char_key_unique
     ON ${TBL} (user_id, character_name_key);
   `);
 
-  // helpful index for admin ordering/search
+  // 5) Helpful index for sorting/searching
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS birthdays_month_day_idx
+    CREATE INDEX IF NOT EXISTS birthdays_mmdd_idx
     ON ${TBL} (month, day);
   `);
 }
 
-// boot
+// Run once on boot
 ensureSchema().catch((e) => {
   console.error("[BOOT] schema ensure failed:", e);
   process.exit(1);
 });
 
-// ---------- Discord OAuth helpers ----------
+// ---------------- Discord OAuth helpers ----------------
 async function discordTokenExchange(code) {
   const body = new URLSearchParams({
     client_id: DISCORD_CLIENT_ID,
@@ -262,19 +255,23 @@ async function discordGetUser(accessToken) {
 }
 
 async function discordGetMemberRoles(userId) {
-  const r = await fetch(`https://discord.com/api/guilds/${DISCORD_GUILD_ID}/members/${userId}`, {
-    headers: { Authorization: `Bot ${BOT_TOKEN}` },
-  });
+  const r = await fetch(
+    `https://discord.com/api/guilds/${DISCORD_GUILD_ID}/members/${userId}`,
+    { headers: { Authorization: `Bot ${BOT_TOKEN}` } }
+  );
+
   const text = await r.text();
   if (!r.ok) {
+    // if user isn't in server, treat as no roles
     console.warn("[DISCORD] member lookup failed:", r.status, text);
     return [];
   }
+
   const member = JSON.parse(text);
   return Array.isArray(member.roles) ? member.roles : [];
 }
 
-// ---------- Routes ----------
+// ---------------- Routes ----------------
 app.get("/", (req, res) => {
   const user = req.session.user || null;
 
@@ -282,21 +279,38 @@ app.get("/", (req, res) => {
   res.send(`
     <!doctype html>
     <html>
-      <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Mnemosyne Admin</title></head>
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>Mnemosyne Admin</title>
+      </head>
       <body style="font-family: system-ui; padding: 24px;">
         <h1>Mnemosyne Admin</h1>
 
-        ${user ? `
-          <p>Logged in as <b>${escapeHtml(user.username)}</b> ${user.is_admin ? "(admin)" : ""}</p>
+        ${
+          user
+            ? `
+          <p>Logged in as <b>${escapeHtml(user.username)}</b> ${
+                user.is_admin ? "(admin)" : ""
+              }</p>
           <ul>
             <li><a href="/me/birthdays">My birthdays</a></li>
-            ${user.is_admin ? `<li><a href="/admin/birthdays">Admin: all birthdays</a></li>` : ""}
+            ${
+              user.is_admin
+                ? `
+              <li><a href="/admin/birthdays">Admin: all birthdays</a></li>
+              <li><a href="/admin/search">Admin: search</a></li>
+            `
+                : ""
+            }
             <li><a href="/logout">Logout</a></li>
           </ul>
-        ` : `
+        `
+            : `
           <p>You are not logged in.</p>
           <p><a href="/login">Login with Discord</a></p>
-        `}
+        `
+        }
 
         <hr/>
         <p><a href="/health">Health</a></p>
@@ -308,9 +322,14 @@ app.get("/", (req, res) => {
 app.get("/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
-    res.json({ ok: true, table: BIRTHDAYS_TABLE });
+    res.json({
+      ok: true,
+      table: BIRTHDAYS_TABLE,
+      authed: Boolean(req.session.user),
+      is_admin: Boolean(req.session.user?.is_admin),
+    });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e), table: BIRTHDAYS_TABLE });
+    res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
@@ -341,37 +360,15 @@ app.get("/callback", async (req, res) => {
 
     if (!code) return res.status(400).send("Missing ?code");
     if (!state || state !== req.session.oauth_state) {
-      return res.status(400).send("OAuth state mismatch. Please try /login again.");
+      return res.status(400).send("OAuth state mismatch. Please go to /login again.");
     }
 
     const token = await discordTokenExchange(code);
     const user = await discordGetUser(token.access_token);
     const roles = await discordGetMemberRoles(user.id);
 
-    // store user for searching later
-    await pool.query(
-      `
-      INSERT INTO users (user_id, username, discriminator, global_name, avatar, updated_at)
-      VALUES ($1, $2, $3, $4, $5, now())
-      ON CONFLICT (user_id)
-      DO UPDATE SET
-        username=EXCLUDED.username,
-        discriminator=EXCLUDED.discriminator,
-        global_name=EXCLUDED.global_name,
-        avatar=EXCLUDED.avatar,
-        updated_at=now()
-      `,
-      [
-        String(user.id),
-        user.username || null,
-        user.discriminator || null,
-        user.global_name || null,
-        user.avatar || null,
-      ]
-    );
-
     req.session.user = {
-      id: String(user.id),
+      id: user.id,
       username: user.username,
       discriminator: user.discriminator,
       avatar: user.avatar,
@@ -397,7 +394,7 @@ app.get("/logout", (req, res) => {
   req.session.destroy(() => res.redirect("/"));
 });
 
-// ---------- Per-user birthdays ----------
+// ---------------- Per-user birthdays ----------------
 app.get("/me/birthdays", mustBeAuthed, async (req, res) => {
   const userId = String(req.session.user.id);
 
@@ -429,14 +426,18 @@ app.get("/me/birthdays", mustBeAuthed, async (req, res) => {
         <hr/>
 
         <h3>List</h3>
-        ${rows.length ? `
+        ${
+          rows.length
+            ? `
           <table border="1" cellpadding="8" cellspacing="0">
             <thead><tr><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
             <tbody>
-              ${rows.map(r => `
+              ${rows
+                .map(
+                  (r) => `
                 <tr>
                   <td>${escapeHtml(r.character_name)}</td>
-                  <td>${String(r.month).padStart(2,"0")}-${String(r.day).padStart(2,"0")}</td>
+                  <td>${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}</td>
                   <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank">link</a>` : ""}</td>
                   <td>
                     <form method="POST" action="/me/birthdays/${r.id}/delete" style="display:inline;">
@@ -446,17 +447,21 @@ app.get("/me/birthdays", mustBeAuthed, async (req, res) => {
                       <summary>Edit</summary>
                       <form method="POST" action="/me/birthdays/${r.id}/edit">
                         <div><label>Name<br/><input name="character_name" value="${escapeHtml(r.character_name)}" required/></label></div>
-                        <div><label>MM-DD<br/><input name="mmdd" value="${String(r.month).padStart(2,"0")}-${String(r.day).padStart(2,"0")}" required/></label></div>
+                        <div><label>MM-DD<br/><input name="mmdd" value="${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}" required/></label></div>
                         <div><label>Image URL<br/><input name="image_url" value="${escapeHtml(r.image_url || "")}" style="width: 460px"/></label></div>
                         <button type="submit">Save</button>
                       </form>
                     </details>
                   </td>
                 </tr>
-              `).join("")}
+              `
+                )
+                .join("")}
             </tbody>
           </table>
-        ` : `<p>No birthdays yet.</p>`}
+        `
+            : `<p>No birthdays yet.</p>`
+        }
       </body>
     </html>
   `);
@@ -465,7 +470,6 @@ app.get("/me/birthdays", mustBeAuthed, async (req, res) => {
 app.post("/me/birthdays", mustBeAuthed, async (req, res) => {
   try {
     const userId = String(req.session.user.id);
-
     const character_name = cleanName(req.body.character_name);
     const mmdd = String(req.body.mmdd || "");
     const image_url = cleanName(req.body.image_url || "");
@@ -473,10 +477,9 @@ app.post("/me/birthdays", mustBeAuthed, async (req, res) => {
     if (!character_name) return res.status(400).send("Missing character_name");
     if (!mmddValid(mmdd)) return res.status(400).send("Invalid mmdd (use MM-DD)");
 
-    const [m, d] = mmdd.split("-").map((x) => Number(x));
-    const key = characterNameKey(character_name);
+    const [m, d] = parseMmdd(mmdd);
+    const character_name_key = charKey(character_name);
 
-    // ✅ THIS is what fixes your NOT NULL character_name_key issue
     await pool.query(
       `
       INSERT INTO ${TBL} (user_id, character_name, character_name_key, month, day, image_url, updated_at)
@@ -489,12 +492,12 @@ app.post("/me/birthdays", mustBeAuthed, async (req, res) => {
         image_url = EXCLUDED.image_url,
         updated_at = now()
       `,
-      [userId, character_name, key, m, d, image_url]
+      [userId, character_name, character_name_key, m, d, image_url]
     );
 
     res.redirect("/me/birthdays");
   } catch (e) {
-    console.error("[ADD me] failed:", e);
+    console.error("[ADD ME] error:", e);
     res.status(500).send(`Add failed: ${escapeHtml(e.message)}`);
   }
 });
@@ -512,9 +515,10 @@ app.post("/me/birthdays/:id/edit", mustBeAuthed, async (req, res) => {
     if (!character_name) return res.status(400).send("Missing character_name");
     if (!mmddValid(mmdd)) return res.status(400).send("Invalid mmdd (use MM-DD)");
 
-    const [m, d] = mmdd.split("-").map((x) => Number(x));
-    const key = characterNameKey(character_name);
+    const [m, d] = parseMmdd(mmdd);
+    const character_name_key = charKey(character_name);
 
+    // Only update if this row belongs to the current user
     await pool.query(
       `
       UPDATE ${TBL}
@@ -526,12 +530,12 @@ app.post("/me/birthdays/:id/edit", mustBeAuthed, async (req, res) => {
           updated_at=now()
       WHERE id=$6 AND user_id=$7
       `,
-      [character_name, key, m, d, image_url, id, userId]
+      [character_name, character_name_key, m, d, image_url, id, userId]
     );
 
     res.redirect("/me/birthdays");
   } catch (e) {
-    console.error("[EDIT me] failed:", e);
+    console.error("[EDIT ME] error:", e);
     res.status(500).send(`Edit failed: ${escapeHtml(e.message)}`);
   }
 });
@@ -545,63 +549,18 @@ app.post("/me/birthdays/:id/delete", mustBeAuthed, async (req, res) => {
     await pool.query(`DELETE FROM ${TBL} WHERE id=$1 AND user_id=$2`, [id, userId]);
     res.redirect("/me/birthdays");
   } catch (e) {
-    console.error("[DEL me] failed:", e);
+    console.error("[DEL ME] error:", e);
     res.status(500).send(`Delete failed: ${escapeHtml(e.message)}`);
   }
 });
 
-// ---------- Admin: search users + add birthdays for other people ----------
+// ---------------- Admin: all birthdays + Option B add (raw user id) ----------------
 app.get("/admin/birthdays", mustBeAdmin, async (req, res) => {
-  const q = String(req.query.q || "").trim();
-  const uq = String(req.query.uq || "").trim(); // user search
-
-  // birthdays list
-  let birthdayRows = [];
-  if (!q) {
-    ({ rows: birthdayRows } = await pool.query(
-      `
-      SELECT b.id, b.user_id, b.character_name, b.month, b.day, b.image_url,
-             u.username, u.global_name
-      FROM ${TBL} b
-      LEFT JOIN users u ON u.user_id = b.user_id
-      ORDER BY b.month ASC, b.day ASC, b.character_name_key ASC
-      `
-    ));
-  } else {
-    ({ rows: birthdayRows } = await pool.query(
-      `
-      SELECT b.id, b.user_id, b.character_name, b.month, b.day, b.image_url,
-             u.username, u.global_name
-      FROM ${TBL} b
-      LEFT JOIN users u ON u.user_id = b.user_id
-      WHERE
-        b.character_name ILIKE $1
-        OR b.user_id = $2
-        OR u.username ILIKE $1
-        OR u.global_name ILIKE $1
-      ORDER BY b.month ASC, b.day ASC, b.character_name_key ASC
-      `,
-      [`%${q}%`, q]
-    ));
-  }
-
-  // user search results for admin-add form
-  let userRows = [];
-  if (uq) {
-    ({ rows: userRows } = await pool.query(
-      `
-      SELECT user_id, username, global_name
-      FROM users
-      WHERE
-        user_id = $1
-        OR username ILIKE $2
-        OR global_name ILIKE $2
-      ORDER BY lower(coalesce(global_name, username, user_id)) ASC
-      LIMIT 25
-      `,
-      [uq, `%${uq}%`]
-    ));
-  }
+  const { rows } = await pool.query(
+    `SELECT id, user_id, character_name, month, day, image_url
+     FROM ${TBL}
+     ORDER BY month ASC, day ASC, character_name_key ASC`
+  );
 
   res.setHeader("content-type", "text/html; charset=utf-8");
   res.send(`
@@ -609,66 +568,35 @@ app.get("/admin/birthdays", mustBeAdmin, async (req, res) => {
     <html>
       <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Admin Birthdays</title></head>
       <body style="font-family: system-ui; padding: 24px;">
-        <p><a href="/">← Home</a></p>
+        <p><a href="/">← Home</a> &nbsp; | &nbsp; <a href="/admin/search">Admin Search</a></p>
         <h2>Admin: All Birthdays</h2>
 
-        <h3>Search birthdays</h3>
-        <form method="GET" action="/admin/birthdays" style="margin: 12px 0;">
-          <input name="q" placeholder="Search character / username / user_id" value="${escapeHtml(q)}" style="width:360px;">
-          <button type="submit">Search</button>
-          <a href="/admin/birthdays" style="margin-left:8px;">Clear</a>
+        <h3>Admin Add (Option B — raw Discord user ID)</h3>
+        <form method="POST" action="/admin/birthdays/add">
+          <div><label>Discord User ID<br/><input name="user_id" required style="width: 360px"/></label></div>
+          <div><label>Character Name<br/><input name="character_name" required style="width: 360px"/></label></div>
+          <div><label>Date (MM-DD)<br/><input name="mmdd" placeholder="07-12" required style="width: 120px"/></label></div>
+          <div><label>Image URL<br/><input name="image_url" style="width: 560px"/></label></div>
+          <button type="submit">Add for user</button>
         </form>
 
         <hr/>
 
-        <h3>Admin Add (for any user)</h3>
-        <form method="GET" action="/admin/birthdays" style="margin: 12px 0;">
-          <input name="uq" placeholder="Find user (username / global name / user_id)" value="${escapeHtml(uq)}" style="width:360px;">
-          ${q ? `<input type="hidden" name="q" value="${escapeHtml(q)}">` : ""}
-          <button type="submit">Find</button>
-        </form>
+        <p>Total rows: <b>${rows.length}</b></p>
 
-        ${uq ? `
-          <form method="POST" action="/admin/birthdays/add" style="border:1px solid #ccc; padding:12px; max-width: 760px;">
-            <div>
-              <label>User
-                <br/>
-                <select name="target_user_id" required style="width: 520px;">
-                  <option value="">-- pick a user --</option>
-                  ${userRows.map(u => `
-                    <option value="${escapeHtml(u.user_id)}">
-                      ${escapeHtml(u.global_name || u.username || u.user_id)} (${escapeHtml(u.user_id)})
-                    </option>
-                  `).join("")}
-                </select>
-              </label>
-            </div>
-            <div style="margin-top:8px;">
-              <label>Character Name<br/><input name="character_name" required style="width: 360px"/></label>
-            </div>
-            <div style="margin-top:8px;">
-              <label>Date (MM-DD)<br/><input name="mmdd" placeholder="07-12" required style="width: 120px"/></label>
-            </div>
-            <div style="margin-top:8px;">
-              <label>Image URL<br/><input name="image_url" style="width: 560px"/></label>
-            </div>
-            <button type="submit" style="margin-top:10px;">Add for user</button>
-          </form>
-        ` : `<p style="color:#666;">Search a user above to enable the admin add form.</p>`}
-
-        <hr/>
-
-        <h3>All birthdays (${birthdayRows.length})</h3>
-        ${birthdayRows.length ? `
+        ${
+          rows.length
+            ? `
           <table border="1" cellpadding="8" cellspacing="0">
-            <thead><tr><th>User</th><th>User ID</th><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
+            <thead><tr><th>User ID</th><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
             <tbody>
-              ${birthdayRows.map(r => `
+              ${rows
+                .map(
+                  (r) => `
                 <tr>
-                  <td>${escapeHtml(r.global_name || r.username || "(unknown)")}</td>
                   <td>${escapeHtml(r.user_id)}</td>
                   <td>${escapeHtml(r.character_name)}</td>
-                  <td>${String(r.month).padStart(2,"0")}-${String(r.day).padStart(2,"0")}</td>
+                  <td>${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}</td>
                   <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank">link</a>` : ""}</td>
                   <td>
                     <form method="POST" action="/admin/birthdays/${r.id}/delete" style="display:inline;">
@@ -676,10 +604,14 @@ app.get("/admin/birthdays", mustBeAdmin, async (req, res) => {
                     </form>
                   </td>
                 </tr>
-              `).join("")}
+              `
+                )
+                .join("")}
             </tbody>
           </table>
-        ` : `<p>No rows.</p>`}
+        `
+            : `<p>No rows.</p>`
+        }
       </body>
     </html>
   `);
@@ -687,17 +619,19 @@ app.get("/admin/birthdays", mustBeAdmin, async (req, res) => {
 
 app.post("/admin/birthdays/add", mustBeAdmin, async (req, res) => {
   try {
-    const targetUserId = String(req.body.target_user_id || "").trim();
+    const targetUserId = String(req.body.user_id || "").trim();
     const character_name = cleanName(req.body.character_name);
     const mmdd = String(req.body.mmdd || "");
     const image_url = cleanName(req.body.image_url || "");
 
-    if (!targetUserId) return res.status(400).send("Missing target_user_id");
+    if (!targetUserId) return res.status(400).send("Missing user_id");
+    if (!/^\d{15,25}$/.test(targetUserId))
+      return res.status(400).send("user_id should be a Discord numeric ID");
     if (!character_name) return res.status(400).send("Missing character_name");
     if (!mmddValid(mmdd)) return res.status(400).send("Invalid mmdd (use MM-DD)");
 
-    const [m, d] = mmdd.split("-").map((x) => Number(x));
-    const key = characterNameKey(character_name);
+    const [m, d] = parseMmdd(mmdd);
+    const character_name_key = charKey(character_name);
 
     await pool.query(
       `
@@ -711,12 +645,12 @@ app.post("/admin/birthdays/add", mustBeAdmin, async (req, res) => {
         image_url = EXCLUDED.image_url,
         updated_at = now()
       `,
-      [targetUserId, character_name, key, m, d, image_url]
+      [targetUserId, character_name, character_name_key, m, d, image_url]
     );
 
-    res.redirect("/admin/birthdays?uq=" + encodeURIComponent(targetUserId));
+    res.redirect("/admin/birthdays");
   } catch (e) {
-    console.error("[ADMIN ADD] failed:", e);
+    console.error("[ADMIN ADD] error:", e);
     res.status(500).send(`Admin add failed: ${escapeHtml(e.message)}`);
   }
 });
@@ -729,16 +663,104 @@ app.post("/admin/birthdays/:id/delete", mustBeAdmin, async (req, res) => {
     await pool.query(`DELETE FROM ${TBL} WHERE id=$1`, [id]);
     res.redirect("/admin/birthdays");
   } catch (e) {
-    console.error("[ADMIN DEL] failed:", e);
+    console.error("[ADMIN DEL] error:", e);
     res.status(500).send(`Admin delete failed: ${escapeHtml(e.message)}`);
   }
 });
 
-// ---------- Start ----------
-app.listen(PORT, () => {
-  console.log(`[WEB] listening on :${PORT}`);
-  console.log(`[WEB] table = ${BIRTHDAYS_TABLE} (quoted ${TBL})`);
-  console.log(`[WEB] admin roles configured = ${ADMIN_ROLE_IDS.length ? ADMIN_ROLE_IDS.join(",") : "(none)"}`);
+// ---------------- Admin search ----------------
+app.get("/admin/search", mustBeAdmin, async (req, res) => {
+  const q = String(req.query.q || "").trim();
+  let rows = [];
+
+  if (q) {
+    if (/^\d{15,25}$/.test(q)) {
+      // search by user id
+      const r = await pool.query(
+        `SELECT id, user_id, character_name, month, day, image_url
+         FROM ${TBL}
+         WHERE user_id=$1
+         ORDER BY month ASC, day ASC, character_name_key ASC`,
+        [q]
+      );
+      rows = r.rows;
+    } else {
+      // search by character name substring (case-insensitive)
+      const r = await pool.query(
+        `SELECT id, user_id, character_name, month, day, image_url
+         FROM ${TBL}
+         WHERE character_name ILIKE $1
+         ORDER BY month ASC, day ASC, character_name_key ASC
+         LIMIT 200`,
+        [`%${q}%`]
+      );
+      rows = r.rows;
+    }
+  }
+
+  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.send(`
+    <!doctype html>
+    <html>
+      <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Admin Search</title></head>
+      <body style="font-family: system-ui; padding: 24px;">
+        <p><a href="/">← Home</a> &nbsp; | &nbsp; <a href="/admin/birthdays">Admin Birthdays</a></p>
+        <h2>Admin Search</h2>
+
+        <form method="GET" action="/admin/search">
+          <div>
+            <label>Search (Discord user id OR character name)</label><br/>
+            <input name="q" value="${escapeHtml(q)}" style="width: 420px"/>
+            <button type="submit">Search</button>
+          </div>
+        </form>
+
+        <hr/>
+
+        ${
+          q
+            ? `<p>Results for <b>${escapeHtml(q)}</b>: ${rows.length}</p>`
+            : `<p>Enter a user id (numbers) or a character name.</p>`
+        }
+
+        ${
+          rows.length
+            ? `
+          <table border="1" cellpadding="8" cellspacing="0">
+            <thead><tr><th>User ID</th><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
+            <tbody>
+              ${rows
+                .map(
+                  (r) => `
+                <tr>
+                  <td>${escapeHtml(r.user_id)}</td>
+                  <td>${escapeHtml(r.character_name)}</td>
+                  <td>${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}</td>
+                  <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank">link</a>` : ""}</td>
+                  <td>
+                    <form method="POST" action="/admin/birthdays/${r.id}/delete" style="display:inline;">
+                      <button type="submit" onclick="return confirm('Admin delete this birthday?')">Delete</button>
+                    </form>
+                  </td>
+                </tr>
+              `
+                )
+                .join("")}
+            </tbody>
+          </table>
+        `
+            : q
+            ? `<p>No matches.</p>`
+            : ``
+        }
+      </body>
+    </html>
+  `);
 });
 
-
+// ---------------- Start ----------------
+app.listen(PORT, () => {
+  console.log(`[WEB] listening on :${PORT}`);
+  console.log(`[WEB] birthdays table: ${BIRTHDAYS_TABLE} (quoted as ${TBL})`);
+  console.log(`[WEB] admin role ids: ${ADMIN_ROLE_IDS.length ? ADMIN_ROLE_IDS.join(",") : "(none set)"}`);
+});
