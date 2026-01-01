@@ -1,100 +1,199 @@
-import "dotenv/config";
+/**
+ * index.js — Mnemosyne Admin (Railway) — full working file
+ *
+ * Fixes:
+ * - No res.render / no views directory required
+ * - Railway/proxy-safe sessions (trust proxy + secure cookies)
+ * - Discord OAuth works without login loop (req.session.save before redirect)
+ * - Postgres-backed sessions via connect-pg-simple with auto table creation
+ * - Basic CRUD endpoints for birthdays (user + admin)
+ *
+ * ENV REQUIRED:
+ *   DATABASE_URL
+ *   DISCORD_CLIENT_ID
+ *   DISCORD_CLIENT_SECRET
+ *   DISCORD_REDIRECT_URI          e.g. https://YOUR-SERVICE.up.railway.app/callback
+ *   DISCORD_GUILD_ID
+ *   SESSION_SECRET
+ *
+ * OPTIONAL:
+ *   ALLOWED_ROLE_IDS              comma-separated role IDs that count as admin (or empty = no role admin)
+ *   PORT                          defaults 3000
+ *
+ * DB TABLE EXPECTED:
+ *   "Birthdays" (capital B)  OR set BIRTHDAYS_TABLE to the exact name.
+ *
+ * Columns expected:
+ *   id (serial/bigserial primary key)   [optional if you use (user_id, character_name) unique]
+ *   user_id text or bigint
+ *   character_name text
+ *   month int
+ *   day int
+ *   image_url text
+ *
+ * If your table name is different:
+ *   set env BIRTHDAYS_TABLE=Birthdays
+ */
+
 import express from "express";
 import session from "express-session";
 import pg from "pg";
-import pgSession from "connect-pg-simple";
-import fetch from "node-fetch";
-import path from "path";
-import { fileURLToPath } from "url";
+import connectPgSimple from "connect-pg-simple";
+import crypto from "crypto";
 
-const {
-  DATABASE_URL,
-  SESSION_SECRET,
-  DISCORD_CLIENT_ID,
-  DISCORD_CLIENT_SECRET,
-  DISCORD_REDIRECT_URI,
-  DISCORD_GUILD_ID,
-  ADMIN_ROLE_IDS,
-  DISCORD_BOT_TOKEN,
-} = process.env;
+const { Pool } = pg;
+const PgSession = connectPgSimple(session);
 
-const PORT = process.env.PORT || 3000;
+const app = express();
 
-// ---- basic env checks (helpful instead of mystery errors)
+// ---------- Env helpers ----------
 function requireEnv(name) {
-  if (!process.env[name]) throw new Error(`Missing required env var: ${name}`);
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing required env var: ${name}`);
+  return v;
 }
-[
-  "DATABASE_URL",
-  "SESSION_SECRET",
-  "DISCORD_CLIENT_ID",
-  "DISCORD_CLIENT_SECRET",
-  "DISCORD_REDIRECT_URI",
-  "DISCORD_GUILD_ID",
-  "ADMIN_ROLE_IDS",
-  "DISCORD_BOT_TOKEN",
-].forEach(requireEnv);
 
-const adminRoleIds = (ADMIN_ROLE_IDS || "")
+const PORT = Number(process.env.PORT || 3000);
+
+const DATABASE_URL = requireEnv("DATABASE_URL");
+const DISCORD_CLIENT_ID = requireEnv("DISCORD_CLIENT_ID");
+const DISCORD_CLIENT_SECRET = requireEnv("DISCORD_CLIENT_SECRET");
+const DISCORD_REDIRECT_URI = requireEnv("DISCORD_REDIRECT_URI");
+const DISCORD_GUILD_ID = requireEnv("DISCORD_GUILD_ID");
+const SESSION_SECRET = requireEnv("SESSION_SECRET");
+
+const BIRTHDAYS_TABLE = process.env.BIRTHDAYS_TABLE || "Birthdays";
+
+// Admin roles allowed to use /admin routes (comma-separated role IDs)
+const ALLOWED_ROLE_IDS = (process.env.ALLOWED_ROLE_IDS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
-// ---- Postgres pool
-const pool = new pg.Pool({
+// ---------- Postgres ----------
+const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: DATABASE_URL.includes("localhost") ? false : { rejectUnauthorized: false },
+  ssl: process.env.PGSSLMODE === "disable" ? false : undefined,
 });
 
-// ---- sessions stored in Postgres (recommended on Railway)
-const PgStore = pgSession(session);
-const app = express();
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-app.set("view engine", "ejs");
-app.set("views", path.join(__dirname, "views"));
+// ---------- App middleware ----------
+app.set("trust proxy", 1); // IMPORTANT for Railway HTTPS + secure cookies
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
+// Postgres-backed sessions (fixes redirect loop + survives restarts)
 app.use(
   session({
-    store: new PgStore({ pool, tableName: "web_sessions" }),
+    store: new PgSession({
+      pool,
+      tableName: "web_sessions",
+      createTableIfMissing: true,
+    }),
+    name: "mnemo.sid",
     secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
+      secure: true, // Railway uses HTTPS
       sameSite: "lax",
-      secure: true, // Railway is HTTPS
-      maxAge: 1000 * 60 * 60 * 24 * 7,
+      maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
     },
   })
 );
 
-// ---------- helpers ----------
-function cleanName(s = "") {
-  return String(s).replace(/\s+/g, " ").trim();
+// ---------- Utilities ----------
+function escapeHtml(s = "") {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
-function nameKey(s = "") {
-  return cleanName(s).toLowerCase();
+
+function randomState() {
+  return crypto.randomBytes(16).toString("hex");
 }
-function clampInt(n, min, max) {
-  const x = Number.parseInt(n, 10);
-  if (Number.isNaN(x)) return null;
-  return Math.min(max, Math.max(min, x));
+
+function isAdminByRoles(roleIds) {
+  if (!ALLOWED_ROLE_IDS.length) return false;
+  return roleIds.some((r) => ALLOWED_ROLE_IDS.includes(String(r)));
 }
-function requireLogin(req, res, next) {
-  if (!req.session?.user) return res.redirect("/login");
-  next();
-}
-function requireAdmin(req, res, next) {
-  if (!req.session?.user?.is_admin) return res.status(403).send("Admins only.");
+
+function mustBeAuthed(req, res, next) {
+  if (!req.session.user) return res.redirect("/login");
   next();
 }
 
+function mustBeAdmin(req, res, next) {
+  if (!req.session.user) return res.redirect("/login");
+  if (!req.session.user.is_admin) return res.status(403).send("Forbidden (admin only)");
+  next();
+}
+
+function mmddValid(mmdd) {
+  return /^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(mmdd);
+}
+
+function cleanName(name) {
+  return String(name || "").replace(/\s+/g, " ").trim();
+}
+
+function tableIdent(name) {
+  // Safe-ish identifier quoting (prevents casing issues & injection via env)
+  // Only allow letters/numbers/underscore, otherwise error.
+  if (!/^[A-Za-z0-9_]+$/.test(name)) {
+    throw new Error(`Unsafe table name: ${name}`);
+  }
+  return `"${name}"`;
+}
+
+const TBL = tableIdent(BIRTHDAYS_TABLE);
+
+// ---------- Schema ensure ----------
+async function ensureSchema() {
+  // Ensure a dedupe table for "already shouted today" checks if you want it later.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS birthday_shouts (
+      shout_date date NOT NULL,
+      user_id text NOT NULL,
+      character_name_key text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (shout_date, user_id, character_name_key)
+    );
+  `);
+
+  // Ensure birthdays table exists (optional; if you already made it, this will not harm)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ${TBL} (
+      id SERIAL PRIMARY KEY,
+      user_id text NOT NULL,
+      character_name text NOT NULL,
+      month integer NOT NULL CHECK (month BETWEEN 1 AND 12),
+      day integer NOT NULL CHECK (day BETWEEN 1 AND 31),
+      image_url text,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
+  `);
+
+  // Recommended uniqueness: per-user + case-insensitive character name
+  // (prevents duplicates like "Cash Langston" vs "cash langston")
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS birthdays_user_char_unique
+    ON ${TBL} (user_id, lower(character_name));
+  `);
+}
+
+// Run once on boot
+ensureSchema().catch((e) => {
+  console.error("[BOOT] schema ensure failed:", e);
+  process.exit(1);
+});
+
+// ---------- Discord OAuth helpers ----------
 async function discordTokenExchange(code) {
   const body = new URLSearchParams({
     client_id: DISCORD_CLIENT_ID,
@@ -106,76 +205,79 @@ async function discordTokenExchange(code) {
 
   const r = await fetch("https://discord.com/api/oauth2/token", {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    headers: { "content-type": "application/x-www-form-urlencoded" },
     body,
   });
 
+  const text = await r.text();
   if (!r.ok) {
-    const text = await r.text();
     throw new Error(`Token exchange failed: ${r.status} ${text}`);
   }
-  return r.json();
+  return JSON.parse(text);
 }
 
 async function discordGetUser(accessToken) {
   const r = await fetch("https://discord.com/api/users/@me", {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
-  if (!r.ok) throw new Error(`Fetch user failed: ${r.status}`);
-  return r.json();
+  const text = await r.text();
+  if (!r.ok) throw new Error(`Get user failed: ${r.status} ${text}`);
+  return JSON.parse(text);
 }
 
-// Fetch member roles using BOT token (server-side, reliable)
 async function discordGetMemberRoles(userId) {
-  const url = `https://discord.com/api/guilds/${DISCORD_GUILD_ID}/members/${userId}`;
-  const r = await fetch(url, {
-    headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
+  // Requires Bot Token to read guild member roles.
+  // Use your BOT TOKEN here (not client secret).
+  // Put it in env BOT_TOKEN.
+  const BOT_TOKEN = requireEnv("BOT_TOKEN");
+
+  const r = await fetch(`https://discord.com/api/guilds/${DISCORD_GUILD_ID}/members/${userId}`, {
+    headers: { Authorization: `Bot ${BOT_TOKEN}` },
   });
 
-  // If the user isn't in the server, this will 404.
-  if (r.status === 404) return [];
+  const text = await r.text();
   if (!r.ok) {
-    const text = await r.text();
-    throw new Error(`Fetch member failed: ${r.status} ${text}`);
+    // If the user isn't in the server, this will fail; treat as no roles.
+    console.warn("[DISCORD] member lookup failed:", r.status, text);
+    return [];
   }
-
-  const member = await r.json();
-  return member.roles || [];
+  const member = JSON.parse(text);
+  return Array.isArray(member.roles) ? member.roles : [];
 }
-
-function isAdminByRoles(roles = []) {
-  return roles.some((rid) => adminRoleIds.includes(rid));
-}
-
-// ---------- DB: ensure table exists ----------
-async function ensureSchema() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS birthdays (
-      id BIGSERIAL PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      character_name TEXT NOT NULL,
-      character_name_key TEXT NOT NULL,
-      month INT NOT NULL CHECK (month BETWEEN 1 AND 12),
-      day INT NOT NULL CHECK (day BETWEEN 1 AND 31),
-      image_url TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      UNIQUE (user_id, character_name_key)
-    );
-  `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS birthdays_user_id_idx ON birthdays(user_id);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS birthdays_month_day_idx ON birthdays(month, day);`);
-}
-
-// run once on boot
-ensureSchema().catch((e) => {
-  console.error("[BOOT] schema ensure failed:", e);
-  process.exit(1);
-});
 
 // ---------- Routes ----------
 app.get("/", (req, res) => {
-  res.render("home", { user: req.session.user || null });
+  const user = req.session.user || null;
+
+  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.send(`
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>Mnemosyne Admin</title>
+      </head>
+      <body style="font-family: system-ui; padding: 24px;">
+        <h1>Mnemosyne Admin</h1>
+
+        ${user ? `
+          <p>Logged in as <b>${escapeHtml(user.username)}</b> ${user.is_admin ? "(admin)" : ""}</p>
+          <ul>
+            <li><a href="/me/birthdays">My birthdays</a></li>
+            ${user.is_admin ? `<li><a href="/admin/birthdays">Admin: all birthdays</a></li>` : ""}
+            <li><a href="/logout">Logout</a></li>
+          </ul>
+        ` : `
+          <p>You are not logged in.</p>
+          <p><a href="/login">Login with Discord</a></p>
+        `}
+
+        <hr/>
+        <p><a href="/health">Health</a></p>
+      </body>
+    </html>
+  `);
 });
 
 app.get("/health", async (req, res) => {
@@ -189,20 +291,34 @@ app.get("/health", async (req, res) => {
 
 // Discord OAuth start
 app.get("/login", (req, res) => {
+  const state = randomState();
+  req.session.oauth_state = state;
+
   const params = new URLSearchParams({
     client_id: DISCORD_CLIENT_ID,
     redirect_uri: DISCORD_REDIRECT_URI,
     response_type: "code",
     scope: "identify",
+    state,
   });
-  res.redirect(`https://discord.com/api/oauth2/authorize?${params.toString()}`);
+
+  // Save session before redirect (helps in some proxy setups)
+  req.session.save((err) => {
+    if (err) console.error("[SESSION] save before login redirect failed:", err);
+    res.redirect(`https://discord.com/api/oauth2/authorize?${params.toString()}`);
+  });
 });
 
 // Discord OAuth callback
 app.get("/callback", async (req, res) => {
   try {
     const code = req.query.code;
+    const state = req.query.state;
+
     if (!code) return res.status(400).send("Missing ?code");
+    if (!state || state !== req.session.oauth_state) {
+      return res.status(400).send("OAuth state mismatch. Please try /login again.");
+    }
 
     const token = await discordTokenExchange(code);
     const user = await discordGetUser(token.access_token);
@@ -216,10 +332,19 @@ app.get("/callback", async (req, res) => {
       is_admin: isAdminByRoles(roles),
     };
 
-    res.redirect("/me/birthdays");
+    delete req.session.oauth_state;
+
+    // ✅ IMPORTANT: persist session before redirect (prevents login loop)
+    req.session.save((err) => {
+      if (err) {
+        console.error("[SESSION] save error:", err);
+        return res.status(500).send("Session save failed");
+      }
+      res.redirect("/me/birthdays");
+    });
   } catch (e) {
     console.error("[OAUTH] error:", e);
-    res.status(500).send(`OAuth error: ${e.message}`);
+    res.status(500).send(`OAuth error: ${escapeHtml(e.message)}`);
   }
 });
 
@@ -227,157 +352,192 @@ app.get("/logout", (req, res) => {
   req.session.destroy(() => res.redirect("/"));
 });
 
-// ---- MEMBER: list mine
-app.get("/me/birthdays", requireLogin, async (req, res) => {
-  const userId = req.session.user.id;
+// ---------- Birthdays UI (simple HTML forms) ----------
+// Per-user view/add/edit/delete (only your own)
+app.get("/me/birthdays", mustBeAuthed, async (req, res) => {
+  const userId = String(req.session.user.id);
+
   const { rows } = await pool.query(
     `SELECT id, character_name, month, day, image_url
-     FROM birthdays
+     FROM ${TBL}
      WHERE user_id=$1
-     ORDER BY month, day, lower(character_name)`,
+     ORDER BY month ASC, day ASC, lower(character_name) ASC`,
     [userId]
   );
-  res.render("me", { user: req.session.user, rows, error: null });
+
+  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.send(`
+    <!doctype html>
+    <html>
+      <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>My Birthdays</title></head>
+      <body style="font-family: system-ui; padding: 24px;">
+        <p><a href="/">← Home</a></p>
+        <h2>My Birthdays</h2>
+
+        <h3>Add</h3>
+        <form method="POST" action="/me/birthdays">
+          <div><label>Character Name<br/><input name="character_name" required style="width: 360px"/></label></div>
+          <div><label>Date (MM-DD)<br/><input name="mmdd" placeholder="07-12" required style="width: 120px"/></label></div>
+          <div><label>Image URL<br/><input name="image_url" style="width: 560px"/></label></div>
+          <button type="submit">Add</button>
+        </form>
+
+        <hr/>
+
+        <h3>List</h3>
+        ${rows.length ? `
+          <table border="1" cellpadding="8" cellspacing="0">
+            <thead><tr><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
+            <tbody>
+              ${rows.map(r => `
+                <tr>
+                  <td>${escapeHtml(r.character_name)}</td>
+                  <td>${String(r.month).padStart(2,"0")}-${String(r.day).padStart(2,"0")}</td>
+                  <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank">link</a>` : ""}</td>
+                  <td>
+                    <form method="POST" action="/me/birthdays/${r.id}/delete" style="display:inline;">
+                      <button type="submit" onclick="return confirm('Delete this birthday?')">Delete</button>
+                    </form>
+                    <details style="display:inline-block; margin-left: 8px;">
+                      <summary>Edit</summary>
+                      <form method="POST" action="/me/birthdays/${r.id}/edit">
+                        <div><label>Name<br/><input name="character_name" value="${escapeHtml(r.character_name)}" required/></label></div>
+                        <div><label>MM-DD<br/><input name="mmdd" value="${String(r.month).padStart(2,"0")}-${String(r.day).padStart(2,"0")}" required/></label></div>
+                        <div><label>Image URL<br/><input name="image_url" value="${escapeHtml(r.image_url || "")}" style="width: 460px"/></label></div>
+                        <button type="submit">Save</button>
+                      </form>
+                    </details>
+                  </td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        ` : `<p>No birthdays yet.</p>`}
+      </body>
+    </html>
+  `);
 });
 
-// ---- MEMBER: add mine
-app.post("/me/birthdays", requireLogin, async (req, res) => {
-  const userId = req.session.user.id;
-
+app.post("/me/birthdays", mustBeAuthed, async (req, res) => {
+  const userId = String(req.session.user.id);
   const character_name = cleanName(req.body.character_name);
-  const month = clampInt(req.body.month, 1, 12);
-  const day = clampInt(req.body.day, 1, 31);
-  const image_url = cleanName(req.body.image_url || "") || null;
-  const character_name_key = nameKey(character_name);
+  const mmdd = String(req.body.mmdd || "");
+  const image_url = cleanName(req.body.image_url || "");
 
-  try {
-    if (!character_name) throw new Error("Character name is required.");
-    if (!month || !day) throw new Error("Month/day invalid.");
+  if (!character_name) return res.status(400).send("Missing character_name");
+  if (!mmddValid(mmdd)) return res.status(400).send("Invalid mmdd (use MM-DD)");
 
-    await pool.query(
-      `INSERT INTO birthdays (user_id, character_name, character_name_key, month, day, image_url, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6, now())
-       ON CONFLICT (user_id, character_name_key)
-       DO UPDATE SET
-         character_name=EXCLUDED.character_name,
-         month=EXCLUDED.month,
-         day=EXCLUDED.day,
-         image_url=EXCLUDED.image_url,
-         updated_at=now()`,
-      [userId, character_name, character_name_key, month, day, image_url]
-    );
+  const [m, d] = mmdd.split("-").map((x) => Number(x));
 
-    res.redirect("/me/birthdays");
-  } catch (e) {
-    console.error("[DB] save birthday error:", e);
+  // Upsert by (user_id, lower(character_name)) using the unique index
+  await pool.query(
+    `
+    INSERT INTO ${TBL} (user_id, character_name, month, day, image_url, updated_at)
+    VALUES ($1, $2, $3, $4, NULLIF($5,''), now())
+    ON CONFLICT (user_id, lower(character_name))
+    DO UPDATE SET
+      month = EXCLUDED.month,
+      day = EXCLUDED.day,
+      image_url = EXCLUDED.image_url,
+      updated_at = now()
+    `,
+    [userId, character_name, m, d, image_url]
+  );
 
-    const { rows } = await pool.query(
-      `SELECT id, character_name, month, day, image_url
-       FROM birthdays
-       WHERE user_id=$1
-       ORDER BY month, day, lower(character_name)`,
-      [userId]
-    );
-
-    res.render("me", { user: req.session.user, rows, error: e.message });
-  }
-});
-
-// ---- MEMBER: edit mine
-app.post("/me/birthdays/:id/edit", requireLogin, async (req, res) => {
-  const userId = req.session.user.id;
-  const id = req.params.id;
-
-  const character_name = cleanName(req.body.character_name);
-  const month = clampInt(req.body.month, 1, 12);
-  const day = clampInt(req.body.day, 1, 31);
-  const image_url = cleanName(req.body.image_url || "") || null;
-  const character_name_key = nameKey(character_name);
-
-  try {
-    if (!character_name) throw new Error("Character name is required.");
-    if (!month || !day) throw new Error("Month/day invalid.");
-
-    const result = await pool.query(
-      `UPDATE birthdays
-       SET character_name=$1,
-           character_name_key=$2,
-           month=$3,
-           day=$4,
-           image_url=$5,
-           updated_at=now()
-       WHERE id=$6 AND user_id=$7`,
-      [character_name, character_name_key, month, day, image_url, id, userId]
-    );
-
-    if (result.rowCount === 0) throw new Error("Not found (or not yours).");
-
-    res.redirect("/me/birthdays");
-  } catch (e) {
-    console.error("[DB] edit error:", e);
-    res.redirect("/me/birthdays");
-  }
-});
-
-// ---- MEMBER: delete mine
-app.post("/me/birthdays/:id/delete", requireLogin, async (req, res) => {
-  const userId = req.session.user.id;
-  const id = req.params.id;
-  try {
-    await pool.query(`DELETE FROM birthdays WHERE id=$1 AND user_id=$2`, [id, userId]);
-  } catch (e) {
-    console.error("[DB] delete error:", e);
-  }
   res.redirect("/me/birthdays");
 });
 
-// ---- ADMIN: list all
-app.get("/admin/birthdays", requireLogin, requireAdmin, async (req, res) => {
-  const { rows } = await pool.query(
-    `SELECT id, user_id, character_name, month, day, image_url
-     FROM birthdays
-     ORDER BY month, day, lower(character_name)`
-  );
-  res.render("admin", { user: req.session.user, rows });
-});
-
-// ---- ADMIN: edit any
-app.post("/admin/birthdays/:id/edit", requireLogin, requireAdmin, async (req, res) => {
-  const id = req.params.id;
+app.post("/me/birthdays/:id/edit", mustBeAuthed, async (req, res) => {
+  const userId = String(req.session.user.id);
+  const id = Number(req.params.id);
 
   const character_name = cleanName(req.body.character_name);
-  const month = clampInt(req.body.month, 1, 12);
-  const day = clampInt(req.body.day, 1, 31);
-  const image_url = cleanName(req.body.image_url || "") || null;
-  const character_name_key = nameKey(character_name);
+  const mmdd = String(req.body.mmdd || "");
+  const image_url = cleanName(req.body.image_url || "");
 
-  try {
-    await pool.query(
-      `UPDATE birthdays
-       SET character_name=$1,
-           character_name_key=$2,
-           month=$3,
-           day=$4,
-           image_url=$5,
-           updated_at=now()
-       WHERE id=$6`,
-      [character_name, character_name_key, month, day, image_url, id]
-    );
-  } catch (e) {
-    console.error("[DB][ADMIN] edit error:", e);
-  }
+  if (!id) return res.status(400).send("Bad id");
+  if (!character_name) return res.status(400).send("Missing character_name");
+  if (!mmddValid(mmdd)) return res.status(400).send("Invalid mmdd (use MM-DD)");
+
+  const [m, d] = mmdd.split("-").map((x) => Number(x));
+
+  // Ensure you can only edit your own row
+  await pool.query(
+    `
+    UPDATE ${TBL}
+    SET character_name=$1, month=$2, day=$3, image_url=NULLIF($4,''), updated_at=now()
+    WHERE id=$5 AND user_id=$6
+    `,
+    [character_name, m, d, image_url, id, userId]
+  );
+
+  res.redirect("/me/birthdays");
+});
+
+app.post("/me/birthdays/:id/delete", mustBeAuthed, async (req, res) => {
+  const userId = String(req.session.user.id);
+  const id = Number(req.params.id);
+
+  if (!id) return res.status(400).send("Bad id");
+
+  await pool.query(`DELETE FROM ${TBL} WHERE id=$1 AND user_id=$2`, [id, userId]);
+
+  res.redirect("/me/birthdays");
+});
+
+// ---------- Admin-only view (all birthdays) ----------
+app.get("/admin/birthdays", mustBeAdmin, async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, user_id, character_name, month, day, image_url
+     FROM ${TBL}
+     ORDER BY month ASC, day ASC, lower(character_name) ASC`
+  );
+
+  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.send(`
+    <!doctype html>
+    <html>
+      <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Admin Birthdays</title></head>
+      <body style="font-family: system-ui; padding: 24px;">
+        <p><a href="/">← Home</a></p>
+        <h2>Admin: All Birthdays</h2>
+        <p>Total: ${rows.length}</p>
+        ${rows.length ? `
+          <table border="1" cellpadding="8" cellspacing="0">
+            <thead><tr><th>User ID</th><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
+            <tbody>
+              ${rows.map(r => `
+                <tr>
+                  <td>${escapeHtml(r.user_id)}</td>
+                  <td>${escapeHtml(r.character_name)}</td>
+                  <td>${String(r.month).padStart(2,"0")}-${String(r.day).padStart(2,"0")}</td>
+                  <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank">link</a>` : ""}</td>
+                  <td>
+                    <form method="POST" action="/admin/birthdays/${r.id}/delete" style="display:inline;">
+                      <button type="submit" onclick="return confirm('Admin delete this birthday?')">Delete</button>
+                    </form>
+                  </td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        ` : `<p>No rows.</p>`}
+      </body>
+    </html>
+  `);
+});
+
+app.post("/admin/birthdays/:id/delete", mustBeAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!id) return res.status(400).send("Bad id");
+
+  await pool.query(`DELETE FROM ${TBL} WHERE id=$1`, [id]);
   res.redirect("/admin/birthdays");
 });
 
-// ---- ADMIN: delete any
-app.post("/admin/birthdays/:id/delete", requireLogin, requireAdmin, async (req, res) => {
-  const id = req.params.id;
-  try {
-    await pool.query(`DELETE FROM birthdays WHERE id=$1`, [id]);
-  } catch (e) {
-    console.error("[DB][ADMIN] delete error:", e);
-  }
-  res.redirect("/admin/birthdays");
+// ---------- Start ----------
+app.listen(PORT, () => {
+  console.log(`[WEB] listening on :${PORT}`);
+  console.log(`[WEB] birthdays table env BIRTHDAYS_TABLE=${BIRTHDAYS_TABLE} (quoted as ${TBL})`);
 });
 
-app.listen(PORT, () => console.log(`[WEB] listening on :${PORT}`));
