@@ -1,0 +1,4 @@
+<%- include("layout", { user, body: `
+  <p>This is the web UI for adding/editing birthdays.</p>
+  <p>${user ? 'Go to <a href="/me/birthdays">My Birthdays</a>.' : 'Please <a href="/login">log in with Discord</a>.'}</p>
+` }) %>
