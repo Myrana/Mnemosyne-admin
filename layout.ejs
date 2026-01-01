@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mnemosyne Birthdays</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; max-width: 980px; }
+    .top { display:flex; gap:12px; align-items:center; justify-content:space-between; }
+    a, button { cursor:pointer; }
+    table { width:100%; border-collapse:collapse; margin-top:16px; }
+    th, td { border-bottom:1px solid #ddd; padding:10px; text-align:left; vertical-align:top;}
+    input { padding:8px; width:100%; box-sizing:border-box; }
+    .row { display:grid; grid-template-columns: 2fr 1fr 1fr 2fr auto; gap:8px; }
+    .err { background:#ffe3e3; padding:10px; border:1px solid #ffb3b3; margin-top:12px; }
+    .pill { padding:4px 10px; border-radius:999px; border:1px solid #ccc; font-size:12px; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div>
+      <strong>Mnemosyne Birthdays</strong>
+      <% if (user) { %>
+        <span class="pill">Logged in as <%= user.username %></span>
+        <% if (user.is_admin) { %><span class="pill">Admin</span><% } %>
+      <% } %>
+    </div>
+    <div>
+      <% if (!user) { %>
+        <a href="/login">Login with Discord</a>
+      <% } else { %>
+        <a href="/me/birthdays">My Birthdays</a>
+        <% if (user.is_admin) { %> | <a href="/admin/birthdays">Admin Panel</a><% } %>
+        | <a href="/logout">Logout</a>
+      <% } %>
+    </div>
+  </div>
+
+  <%- body %>
+</body>
+</html>
