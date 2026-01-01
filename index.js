@@ -1,275 +1,383 @@
+import "dotenv/config";
 import express from "express";
 import session from "express-session";
-import pkg from "pg";
+import pg from "pg";
+import pgSession from "connect-pg-simple";
+import fetch from "node-fetch";
+import path from "path";
+import { fileURLToPath } from "url";
 
-const { Pool } = pkg;
+const {
+  DATABASE_URL,
+  SESSION_SECRET,
+  DISCORD_CLIENT_ID,
+  DISCORD_CLIENT_SECRET,
+  DISCORD_REDIRECT_URI,
+  DISCORD_GUILD_ID,
+  ADMIN_ROLE_IDS,
+  DISCORD_BOT_TOKEN,
+} = process.env;
 
-const app = express();
 const PORT = process.env.PORT || 3000;
 
-if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is missing");
-if (!process.env.SESSION_SECRET) throw new Error("SESSION_SECRET is missing");
+// ---- basic env checks (helpful instead of mystery errors)
+function requireEnv(name) {
+  if (!process.env[name]) throw new Error(`Missing required env var: ${name}`);
+}
+[
+  "DATABASE_URL",
+  "SESSION_SECRET",
+  "DISCORD_CLIENT_ID",
+  "DISCORD_CLIENT_SECRET",
+  "DISCORD_REDIRECT_URI",
+  "DISCORD_GUILD_ID",
+  "ADMIN_ROLE_IDS",
+  "DISCORD_BOT_TOKEN",
+].forEach(requireEnv);
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+const adminRoleIds = (ADMIN_ROLE_IDS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+// ---- Postgres pool
+const pool = new pg.Pool({
+  connectionString: DATABASE_URL,
+  ssl: DATABASE_URL.includes("localhost") ? false : { rejectUnauthorized: false },
 });
 
+// ---- sessions stored in Postgres (recommended on Railway)
+const PgStore = pgSession(session);
+const app = express();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+app.set("view engine", "ejs");
+app.set("views", path.join(__dirname, "views"));
+
 app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
 app.use(
   session({
-    secret: process.env.SESSION_SECRET,
+    store: new PgStore({ pool, tableName: "web_sessions" }),
+    secret: SESSION_SECRET,
     resave: false,
-    saveUninitialized: false
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: true, // Railway is HTTPS
+      maxAge: 1000 * 60 * 60 * 24 * 7,
+    },
   })
 );
 
 // ---------- helpers ----------
-function esc(s = "") {
-  return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+function cleanName(s = "") {
+  return String(s).replace(/\s+/g, " ").trim();
+}
+function nameKey(s = "") {
+  return cleanName(s).toLowerCase();
+}
+function clampInt(n, min, max) {
+  const x = Number.parseInt(n, 10);
+  if (Number.isNaN(x)) return null;
+  return Math.min(max, Math.max(min, x));
+}
+function requireLogin(req, res, next) {
+  if (!req.session?.user) return res.redirect("/login");
+  next();
+}
+function requireAdmin(req, res, next) {
+  if (!req.session?.user?.is_admin) return res.status(403).send("Admins only.");
+  next();
 }
 
-function rowToMMDD(row) {
-  const m = String(row.month).padStart(2, "0");
-  const d = String(row.day).padStart(2, "0");
-  return `${m}-${d}`;
+async function discordTokenExchange(code) {
+  const body = new URLSearchParams({
+    client_id: DISCORD_CLIENT_ID,
+    client_secret: DISCORD_CLIENT_SECRET,
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: DISCORD_REDIRECT_URI,
+  });
+
+  const r = await fetch("https://discord.com/api/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`Token exchange failed: ${r.status} ${text}`);
+  }
+  return r.json();
 }
 
-// ---------- ROUTES ----------
+async function discordGetUser(accessToken) {
+  const r = await fetch("https://discord.com/api/users/@me", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!r.ok) throw new Error(`Fetch user failed: ${r.status}`);
+  return r.json();
+}
 
-// Home = Add form + link to list
-app.get("/", (req, res) => {
-  res.send(`
-    <h2>Mnemosyne — Birthdays Admin</h2>
-    <p><a href="/birthdays">View / Edit / Delete birthdays</a></p>
-    <hr/>
+// Fetch member roles using BOT token (server-side, reliable)
+async function discordGetMemberRoles(userId) {
+  const url = `https://discord.com/api/guilds/${DISCORD_GUILD_ID}/members/${userId}`;
+  const r = await fetch(url, {
+    headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
+  });
 
-    <h3>Add / Upsert Birthday</h3>
-    <form method="POST" action="/add">
-      <label>User ID</label><br/>
-      <input name="user_id" required /><br/><br/>
+  // If the user isn't in the server, this will 404.
+  if (r.status === 404) return [];
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`Fetch member failed: ${r.status} ${text}`);
+  }
 
-      <label>Character Name</label><br/>
-      <input name="character_name" required /><br/><br/>
+  const member = await r.json();
+  return member.roles || [];
+}
 
-      <label>Month (1-12)</label><br/>
-      <input type="number" name="month" min="1" max="12" required /><br/><br/>
+function isAdminByRoles(roles = []) {
+  return roles.some((rid) => adminRoleIds.includes(rid));
+}
 
-      <label>Day (1-31)</label><br/>
-      <input type="number" name="day" min="1" max="31" required /><br/><br/>
-
-      <label>Image URL</label><br/>
-      <input name="image_url" /><br/><br/>
-
-      <button type="submit">Save</button>
-    </form>
+// ---------- DB: ensure table exists ----------
+async function ensureSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS birthdays (
+      id BIGSERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      character_name TEXT NOT NULL,
+      character_name_key TEXT NOT NULL,
+      month INT NOT NULL CHECK (month BETWEEN 1 AND 12),
+      day INT NOT NULL CHECK (day BETWEEN 1 AND 31),
+      image_url TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (user_id, character_name_key)
+    );
   `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS birthdays_user_id_idx ON birthdays(user_id);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS birthdays_month_day_idx ON birthdays(month, day);`);
+}
+
+// run once on boot
+ensureSchema().catch((e) => {
+  console.error("[BOOT] schema ensure failed:", e);
+  process.exit(1);
 });
 
-// Create / Upsert
-app.post("/add", async (req, res) => {
-  const user_id = String(req.body.user_id || "").trim();
-  const character_name = String(req.body.character_name || "").trim();
-  const month = Number(req.body.month);
-  const day = Number(req.body.day);
-  const image_url = String(req.body.image_url || "").trim() || null;
+// ---------- Routes ----------
+app.get("/", (req, res) => {
+  res.render("home", { user: req.session.user || null });
+});
 
-  if (!user_id || !character_name || !month || !day) {
-    return res.status(400).send("Missing required fields.");
+app.get("/health", async (req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
   }
+});
+
+// Discord OAuth start
+app.get("/login", (req, res) => {
+  const params = new URLSearchParams({
+    client_id: DISCORD_CLIENT_ID,
+    redirect_uri: DISCORD_REDIRECT_URI,
+    response_type: "code",
+    scope: "identify",
+  });
+  res.redirect(`https://discord.com/api/oauth2/authorize?${params.toString()}`);
+});
+
+// Discord OAuth callback
+app.get("/callback", async (req, res) => {
+  try {
+    const code = req.query.code;
+    if (!code) return res.status(400).send("Missing ?code");
+
+    const token = await discordTokenExchange(code);
+    const user = await discordGetUser(token.access_token);
+    const roles = await discordGetMemberRoles(user.id);
+
+    req.session.user = {
+      id: user.id,
+      username: user.username,
+      discriminator: user.discriminator,
+      avatar: user.avatar,
+      is_admin: isAdminByRoles(roles),
+    };
+
+    res.redirect("/me/birthdays");
+  } catch (e) {
+    console.error("[OAUTH] error:", e);
+    res.status(500).send(`OAuth error: ${e.message}`);
+  }
+});
+
+app.get("/logout", (req, res) => {
+  req.session.destroy(() => res.redirect("/"));
+});
+
+// ---- MEMBER: list mine
+app.get("/me/birthdays", requireLogin, async (req, res) => {
+  const userId = req.session.user.id;
+  const { rows } = await pool.query(
+    `SELECT id, character_name, month, day, image_url
+     FROM birthdays
+     WHERE user_id=$1
+     ORDER BY month, day, lower(character_name)`,
+    [userId]
+  );
+  res.render("me", { user: req.session.user, rows, error: null });
+});
+
+// ---- MEMBER: add mine
+app.post("/me/birthdays", requireLogin, async (req, res) => {
+  const userId = req.session.user.id;
+
+  const character_name = cleanName(req.body.character_name);
+  const month = clampInt(req.body.month, 1, 12);
+  const day = clampInt(req.body.day, 1, 31);
+  const image_url = cleanName(req.body.image_url || "") || null;
+  const character_name_key = nameKey(character_name);
 
   try {
+    if (!character_name) throw new Error("Character name is required.");
+    if (!month || !day) throw new Error("Month/day invalid.");
+
     await pool.query(
-      `
-      INSERT INTO birthdays (user_id, character_name, month, day, image_url)
-      VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT (user_id, lower(character_name))
-      DO UPDATE SET
-        month = EXCLUDED.month,
-        day = EXCLUDED.day,
-        image_url = EXCLUDED.image_url;
-      `,
-      [user_id, character_name, month, day, image_url]
+      `INSERT INTO birthdays (user_id, character_name, character_name_key, month, day, image_url, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6, now())
+       ON CONFLICT (user_id, character_name_key)
+       DO UPDATE SET
+         character_name=EXCLUDED.character_name,
+         month=EXCLUDED.month,
+         day=EXCLUDED.day,
+         image_url=EXCLUDED.image_url,
+         updated_at=now()`,
+      [userId, character_name, character_name_key, month, day, image_url]
     );
 
-    res.redirect("/birthdays");
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("Database error saving birthday.");
-  }
-});
+    res.redirect("/me/birthdays");
+  } catch (e) {
+    console.error("[DB] save birthday error:", e);
 
-// List birthdays (+ optional search)
-app.get("/birthdays", async (req, res) => {
-  const q = String(req.query.q || "").trim();
-
-  try {
     const { rows } = await pool.query(
-      q
-        ? `
-          SELECT id, user_id, character_name, month, day, image_url
-          FROM birthdays
-          WHERE
-            user_id ILIKE $1
-            OR character_name ILIKE $1
-          ORDER BY month, day, lower(character_name)
-        `
-        : `
-          SELECT id, user_id, character_name, month, day, image_url
-          FROM birthdays
-          ORDER BY month, day, lower(character_name)
-        `,
-      q ? [`%${q}%`] : []
-    );
-
-    const listHtml = rows
-      .map(
-        (r) => `
-        <tr>
-          <td>${esc(r.user_id)}</td>
-          <td>${esc(r.character_name)}</td>
-          <td>${esc(rowToMMDD(r))}</td>
-          <td>${r.image_url ? `<a href="${esc(r.image_url)}" target="_blank">image</a>` : ""}</td>
-          <td>
-            <a href="/birthdays/${r.id}/edit">edit</a>
-            &nbsp;|&nbsp;
-            <form method="POST" action="/birthdays/${r.id}/delete" style="display:inline"
-              onsubmit="return confirm('Delete ${esc(r.character_name)}?');">
-              <button type="submit">delete</button>
-            </form>
-          </td>
-        </tr>
-      `
-      )
-      .join("");
-
-    res.send(`
-      <h2>Birthdays</h2>
-      <p><a href="/">+ Add new</a></p>
-
-      <form method="GET" action="/birthdays" style="margin-bottom: 12px;">
-        <input name="q" placeholder="search user_id or character" value="${esc(q)}" />
-        <button type="submit">Search</button>
-        ${q ? `<a href="/birthdays" style="margin-left:10px;">Clear</a>` : ""}
-      </form>
-
-      <table border="1" cellpadding="6" cellspacing="0">
-        <thead>
-          <tr>
-            <th>User ID</th>
-            <th>Character</th>
-            <th>Date</th>
-            <th>Image</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${listHtml || `<tr><td colspan="5">No results</td></tr>`}
-        </tbody>
-      </table>
-    `);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("Database error loading birthdays.");
-  }
-});
-
-// Edit form
-app.get("/birthdays/:id/edit", async (req, res) => {
-  const id = Number(req.params.id);
-
-  try {
-    const { rows } = await pool.query(
-      `SELECT id, user_id, character_name, month, day, image_url
+      `SELECT id, character_name, month, day, image_url
        FROM birthdays
-       WHERE id=$1`,
-      [id]
+       WHERE user_id=$1
+       ORDER BY month, day, lower(character_name)`,
+      [userId]
     );
 
-    const r = rows[0];
-    if (!r) return res.status(404).send("Not found.");
-
-    res.send(`
-      <h2>Edit Birthday</h2>
-      <p><a href="/birthdays">← Back to list</a></p>
-
-      <form method="POST" action="/birthdays/${r.id}/edit">
-        <label>User ID</label><br/>
-        <input name="user_id" value="${esc(r.user_id)}" required /><br/><br/>
-
-        <label>Character Name</label><br/>
-        <input name="character_name" value="${esc(r.character_name)}" required /><br/><br/>
-
-        <label>Month (1-12)</label><br/>
-        <input type="number" name="month" min="1" max="12" value="${esc(r.month)}" required /><br/><br/>
-
-        <label>Day (1-31)</label><br/>
-        <input type="number" name="day" min="1" max="31" value="${esc(r.day)}" required /><br/><br/>
-
-        <label>Image URL</label><br/>
-        <input name="image_url" value="${esc(r.image_url || "")}" /><br/><br/>
-
-        <button type="submit">Save Changes</button>
-      </form>
-    `);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("Database error loading record.");
+    res.render("me", { user: req.session.user, rows, error: e.message });
   }
 });
 
-// Edit submit
-app.post("/birthdays/:id/edit", async (req, res) => {
-  const id = Number(req.params.id);
-  const user_id = String(req.body.user_id || "").trim();
-  const character_name = String(req.body.character_name || "").trim();
-  const month = Number(req.body.month);
-  const day = Number(req.body.day);
-  const image_url = String(req.body.image_url || "").trim() || null;
+// ---- MEMBER: edit mine
+app.post("/me/birthdays/:id/edit", requireLogin, async (req, res) => {
+  const userId = req.session.user.id;
+  const id = req.params.id;
 
-  if (!user_id || !character_name || !month || !day) {
-    return res.status(400).send("Missing required fields.");
-  }
+  const character_name = cleanName(req.body.character_name);
+  const month = clampInt(req.body.month, 1, 12);
+  const day = clampInt(req.body.day, 1, 31);
+  const image_url = cleanName(req.body.image_url || "") || null;
+  const character_name_key = nameKey(character_name);
 
   try {
-    // update by id
-    await pool.query(
-      `
-      UPDATE birthdays
-      SET user_id=$1, character_name=$2, month=$3, day=$4, image_url=$5
-      WHERE id=$6
-      `,
-      [user_id, character_name, month, day, image_url, id]
+    if (!character_name) throw new Error("Character name is required.");
+    if (!month || !day) throw new Error("Month/day invalid.");
+
+    const result = await pool.query(
+      `UPDATE birthdays
+       SET character_name=$1,
+           character_name_key=$2,
+           month=$3,
+           day=$4,
+           image_url=$5,
+           updated_at=now()
+       WHERE id=$6 AND user_id=$7`,
+      [character_name, character_name_key, month, day, image_url, id, userId]
     );
 
-    res.redirect("/birthdays");
-  } catch (err) {
-    // If you edited it into a duplicate (same user_id + same name ignoring case),
-    // Postgres unique index will throw — show a friendly message.
-    console.error(err);
-    res.status(500).send("Database error saving changes (maybe duplicate name for same user?).");
+    if (result.rowCount === 0) throw new Error("Not found (or not yours).");
+
+    res.redirect("/me/birthdays");
+  } catch (e) {
+    console.error("[DB] edit error:", e);
+    res.redirect("/me/birthdays");
   }
 });
 
-// Delete
-app.post("/birthdays/:id/delete", async (req, res) => {
-  const id = Number(req.params.id);
+// ---- MEMBER: delete mine
+app.post("/me/birthdays/:id/delete", requireLogin, async (req, res) => {
+  const userId = req.session.user.id;
+  const id = req.params.id;
+  try {
+    await pool.query(`DELETE FROM birthdays WHERE id=$1 AND user_id=$2`, [id, userId]);
+  } catch (e) {
+    console.error("[DB] delete error:", e);
+  }
+  res.redirect("/me/birthdays");
+});
 
+// ---- ADMIN: list all
+app.get("/admin/birthdays", requireLogin, requireAdmin, async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, user_id, character_name, month, day, image_url
+     FROM birthdays
+     ORDER BY month, day, lower(character_name)`
+  );
+  res.render("admin", { user: req.session.user, rows });
+});
+
+// ---- ADMIN: edit any
+app.post("/admin/birthdays/:id/edit", requireLogin, requireAdmin, async (req, res) => {
+  const id = req.params.id;
+
+  const character_name = cleanName(req.body.character_name);
+  const month = clampInt(req.body.month, 1, 12);
+  const day = clampInt(req.body.day, 1, 31);
+  const image_url = cleanName(req.body.image_url || "") || null;
+  const character_name_key = nameKey(character_name);
+
+  try {
+    await pool.query(
+      `UPDATE birthdays
+       SET character_name=$1,
+           character_name_key=$2,
+           month=$3,
+           day=$4,
+           image_url=$5,
+           updated_at=now()
+       WHERE id=$6`,
+      [character_name, character_name_key, month, day, image_url, id]
+    );
+  } catch (e) {
+    console.error("[DB][ADMIN] edit error:", e);
+  }
+  res.redirect("/admin/birthdays");
+});
+
+// ---- ADMIN: delete any
+app.post("/admin/birthdays/:id/delete", requireLogin, requireAdmin, async (req, res) => {
+  const id = req.params.id;
   try {
     await pool.query(`DELETE FROM birthdays WHERE id=$1`, [id]);
-    res.redirect("/birthdays");
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("Database error deleting record.");
+  } catch (e) {
+    console.error("[DB][ADMIN] delete error:", e);
   }
+  res.redirect("/admin/birthdays");
 });
 
-app.listen(PORT, () => {
-  console.log(`Admin app running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`[WEB] listening on :${PORT}`));
