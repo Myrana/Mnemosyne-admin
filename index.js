@@ -65,7 +65,7 @@ const SESSION_SECRET = requireEnv("SESSION_SECRET");
 const BIRTHDAYS_TABLE = process.env.BIRTHDAYS_TABLE || "birthdays";
 
 // Admin roles allowed to use /admin routes (comma-separated role IDs)
-const ALLOWED_ROLE_IDS = (process.env.ALLOWED_ROLE_IDS || "")
+const ADMIN_ROLE_IDS = (process.env.ADMIN_ROLE_IDS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
@@ -118,8 +118,8 @@ function randomState() {
 }
 
 function isAdminByRoles(roleIds) {
-  if (!ALLOWED_ROLE_IDS.length) return false;
-  return roleIds.some((r) => ALLOWED_ROLE_IDS.includes(String(r)));
+  if (!ADMIN_ROLE_IDS.length) return false;
+  return roleIds.some((r) => ADMIN_ROLE_IDS.includes(String(r)));
 }
 
 function mustBeAuthed(req, res, next) {
