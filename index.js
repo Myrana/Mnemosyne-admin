@@ -419,33 +419,53 @@ app.get("/me/birthdays", mustBeAuthed, async (req, res) => {
 });
 
 app.post("/me/birthdays", mustBeAuthed, async (req, res) => {
-  const userId = String(req.session.user.id);
-  const character_name = cleanName(req.body.character_name);
-  const mmdd = String(req.body.mmdd || "");
-  const image_url = cleanName(req.body.image_url || "");
+  try {
+    const userId = String(req.session.user.id);
+    const character_name = cleanName(req.body.character_name);
+    const mmdd = String(req.body.mmdd || "");
+    const image_url = cleanName(req.body.image_url || "");
 
-  if (!character_name) return res.status(400).send("Missing character_name");
-  if (!mmddValid(mmdd)) return res.status(400).send("Invalid mmdd (use MM-DD)");
+    if (!character_name) return res.status(400).send("Missing character_name");
+    if (!mmddValid(mmdd)) return res.status(400).send("Invalid mmdd (use MM-DD)");
 
-  const [m, d] = mmdd.split("-").map((x) => Number(x));
+    const [m, d] = mmdd.split("-").map((x) => Number(x));
+    if (!Number.isInteger(m) || m < 1 || m > 12) return res.status(400).send("Bad month");
+    if (!Number.isInteger(d) || d < 1 || d > 31) return res.status(400).send("Bad day");
 
-  // Upsert by (user_id, lower(character_name)) using the unique index
-  await pool.query(
-    `
-    INSERT INTO ${TBL} (user_id, character_name, month, day, image_url, updated_at)
-    VALUES ($1, $2, $3, $4, NULLIF($5,''), now())
-    ON CONFLICT (user_id, lower(character_name))
-    DO UPDATE SET
-      month = EXCLUDED.month,
-      day = EXCLUDED.day,
-      image_url = EXCLUDED.image_url,
-      updated_at = now()
-    `,
-    [userId, character_name, m, d, image_url]
-  );
+    // 1) Look for existing row (case-insensitive match on name)
+    const found = await pool.query(
+      `SELECT id
+       FROM ${TBL}
+       WHERE user_id = $1 AND lower(character_name) = lower($2)
+       LIMIT 1`,
+      [userId, character_name]
+    );
 
-  res.redirect("/me/birthdays");
+    if (found.rows.length) {
+      // 2) Update existing
+      const id = found.rows[0].id;
+      await pool.query(
+        `UPDATE ${TBL}
+         SET month=$1, day=$2, image_url=NULLIF($3,''), updated_at=now()
+         WHERE id=$4 AND user_id=$5`,
+        [m, d, image_url, id, userId]
+      );
+    } else {
+      // 3) Insert new
+      await pool.query(
+        `INSERT INTO ${TBL} (user_id, character_name, month, day, image_url, updated_at)
+         VALUES ($1, $2, $3, $4, NULLIF($5,''), now())`,
+        [userId, character_name, m, d, image_url]
+      );
+    }
+
+    return res.redirect("/me/birthdays");
+  } catch (e) {
+    console.error("[ADD] failed:", e);
+    return res.status(500).send(`Add failed: ${escapeHtml(e.message)}`);
+  }
 });
+
 
 app.post("/me/birthdays/:id/edit", mustBeAuthed, async (req, res) => {
   const userId = String(req.session.user.id);
@@ -541,17 +561,4 @@ app.listen(PORT, () => {
   console.log(`[WEB] birthdays table env BIRTHDAYS_TABLE=${BIRTHDAYS_TABLE} (quoted as ${TBL})`);
 });
 
-app.get("/debug/birthdays", async (req, res) => {
-  try {
-    const a = await pool.query(`SELECT COUNT(*)::int AS count FROM ${BDAY_T}`);
-    const b = await pool.query(`SELECT user_id, character_name, month, day FROM ${BDAY_T} ORDER BY id DESC LIMIT 5`);
-    res.json({
-      table: BIRTHDAYS_TABLE,
-      count: a.rows[0].count,
-      sample: b.rows,
-      db: (process.env.DATABASE_URL || "").split("@")[1]?.split("/")[0] || "unknown",
-    });
-  } catch (e) {
-    res.status(500).json({ error: String(e), table: BIRTHDAYS_TABLE });
-  }
-});
+
