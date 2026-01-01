@@ -1,0 +1,46 @@
+<% const body = `
+<h2>My Birthdays</h2>
+
+${error ? `<div class="err"><strong>Database error saving birthday:</strong> ${error}</div>` : ""}
+
+<form method="POST" action="/me/birthdays">
+  <div class="row">
+    <input name="character_name" placeholder="Character name" required />
+    <input name="month" placeholder="Month (1-12)" required />
+    <input name="day" placeholder="Day (1-31)" required />
+    <input name="image_url" placeholder="Image URL (optional)" />
+    <button type="submit">Add / Update</button>
+  </div>
+</form>
+
+<table>
+  <thead>
+    <tr><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr>
+  </thead>
+  <tbody>
+    ${rows.map(r => `
+      <tr>
+        <td>${r.character_name}</td>
+        <td>${String(r.month).padStart(2,'0')}-${String(r.day).padStart(2,'0')}</td>
+        <td>${r.image_url ? `<a href="${r.image_url}" target="_blank">link</a>` : ""}</td>
+        <td>
+          <form method="POST" action="/me/birthdays/${r.id}/edit" style="margin-bottom:8px;">
+            <div class="row">
+              <input name="character_name" value="${r.character_name}" required />
+              <input name="month" value="${r.month}" required />
+              <input name="day" value="${r.day}" required />
+              <input name="image_url" value="${r.image_url || ""}" />
+              <button type="submit">Save</button>
+            </div>
+          </form>
+          <form method="POST" action="/me/birthdays/${r.id}/delete" onsubmit="return confirm('Delete this birthday?');">
+            <button type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+    `).join("")}
+  </tbody>
+</table>
+`; %>
+
+<%- include("layout", { user, body }) %>
