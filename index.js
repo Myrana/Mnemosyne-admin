@@ -455,7 +455,7 @@ app.post("/me/birthdays", mustBeAuthed, async (req, res) => {
       await pool.query(
         `INSERT INTO ${TBL} (user_id, character_name, month, day, image_url, updated_at)
          VALUES ($1, $2, $3, $4, NULLIF($5,''), now())`,
-        [userId, character_name, m, d, image_url]
+        [userId, character_name, character_name_key, m, d, image_url]
       );
     }
 
