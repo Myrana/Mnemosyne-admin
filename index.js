@@ -355,13 +355,13 @@ function renderPage({ title, user, bodyHtml }) {
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width,initial-scale=1" />
-      <title>${escapeHtml(title || "Mnemosyne Admin")}</title>
+      <title>${escapeHtml(title || "Mnemosyne Portal")}</title>
       ${baseCss()}
       ${themeToggleScript()}
     </head>
     <body>
       <div class="row">
-        <h1 style="margin:0;">${escapeHtml(title || "Mnemosyne Admin")}</h1>
+        <h1 style="margin:0;">${escapeHtml(title || "Mnemosyne Portal")}</h1>
         ${themeToggleButton()}
       </div>
 
