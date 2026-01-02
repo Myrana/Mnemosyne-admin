@@ -368,7 +368,6 @@ function renderPage({ title, user, bodyHtml }) {
       ${bodyHtml || ""}
 
       <hr/>
-      <p class="small"><a href="/health">Health</a></p>
     </body>
   </html>
   `;
