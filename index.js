@@ -758,6 +758,255 @@ app.get("/admin/search", mustBeAdmin, async (req, res) => {
   `);
 });
 
+// ---------- Backup/Restore helpers ----------
+function toCharKey(name) {
+  return cleanName(name).toLowerCase();
+}
+
+function isRowFormat(obj) {
+  // list-of-rows format
+  return obj && typeof obj === "object" && "user_id" in obj && "character_name" in obj;
+}
+
+function isLegacyFormat(obj) {
+  // legacy: { "123": [ ["Name","MM-DD","url"], ...] }
+  return obj && typeof obj === "object" && !Array.isArray(obj);
+}
+
+function parseLegacyEntry(entry) {
+  // entry: [name, "MM-DD", url]
+  if (!Array.isArray(entry) || entry.length < 2) return null;
+  const character_name = cleanName(entry[0]);
+  const mmdd = String(entry[1] || "");
+  const image_url = cleanName(entry[2] || "");
+
+  if (!character_name) return null;
+  if (!mmddValid(mmdd)) return null;
+
+  const [m, d] = mmdd.split("-").map((x) => Number(x));
+  return {
+    character_name,
+    character_name_key: toCharKey(character_name),
+    month: m,
+    day: d,
+    image_url: image_url || null,
+  };
+}
+
+// ---------- Admin JSON export ----------
+app.get("/admin/export.json", mustBeAdmin, async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT user_id, character_name, character_name_key, month, day, image_url
+     FROM ${TBL}
+     ORDER BY user_id ASC, month ASC, day ASC, character_name_key ASC`
+  );
+
+  // Give them a file download
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  res.setHeader("content-type", "application/json; charset=utf-8");
+  res.setHeader("content-disposition", `attachment; filename="mnemosyne-backup-${stamp}.json"`);
+
+  res.send(
+    JSON.stringify(
+      {
+        exported_at: new Date().toISOString(),
+        table: BIRTHDAYS_TABLE,
+        count: rows.length,
+        rows,
+      },
+      null,
+      2
+    )
+  );
+});
+
+// ---------- Admin import UI ----------
+app.get("/admin/import", mustBeAdmin, async (req, res) => {
+  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.send(`
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8"/>
+        <meta name="viewport" content="width=device-width,initial-scale=1"/>
+        <title>Admin Import</title>
+      </head>
+      <body style="font-family: system-ui; padding: 24px;">
+        <p><a href="/">← Home</a> • <a href="/admin/birthdays">Admin Birthdays</a></p>
+        <h2>Admin: Import JSON Backup</h2>
+
+        <p><b>WARNING:</b> This will <b>upsert</b> rows into the database (insert new + update existing).
+        It will not delete rows that are not present in the import.</p>
+
+        <form method="POST" action="/admin/import">
+          <div>
+            <label>Paste JSON backup here:</label><br/>
+            <textarea name="json" rows="18" style="width: min(920px, 95vw);" required></textarea>
+          </div>
+          <div style="margin-top: 12px;">
+            <label><input type="checkbox" name="confirm" value="yes" required/>
+              I understand this will modify the database.
+            </label>
+          </div>
+          <div style="margin-top: 12px;">
+            <button type="submit">Import</button>
+          </div>
+        </form>
+
+        <hr/>
+        <h3>Supported JSON Formats</h3>
+        <pre style="background:#f6f6f6;padding:12px;border-radius:8px;overflow:auto;">
+1) Export format from this site:
+{
+  "exported_at":"...",
+  "table":"birthdays",
+  "count": 123,
+  "rows":[
+    {"user_id":"...","character_name":"...","character_name_key":"...","month":1,"day":2,"image_url":"..."}
+  ]
+}
+
+2) Legacy bot JSON:
+{
+  "1234567890123": [
+    ["Cash Langston","07-12","https://...png"]
+  ]
+}
+        </pre>
+      </body>
+    </html>
+  `);
+});
+
+// ---------- Admin import handler ----------
+app.post("/admin/import", mustBeAdmin, async (req, res) => {
+  try {
+    if (req.body.confirm !== "yes") return res.status(400).send("Missing confirmation checkbox.");
+
+    const raw = String(req.body.json || "").trim();
+    if (!raw) return res.status(400).send("Missing JSON body.");
+
+    let payload;
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      return res.status(400).send("Invalid JSON.");
+    }
+
+    // Normalize to an array of row objects:
+    // { user_id, character_name, character_name_key, month, day, image_url }
+    let rowsToImport = [];
+
+    // If it's our export wrapper { rows: [...] }
+    if (payload && typeof payload === "object" && Array.isArray(payload.rows)) {
+      for (const r of payload.rows) {
+        if (!isRowFormat(r)) continue;
+        const user_id = String(r.user_id);
+        const character_name = cleanName(r.character_name);
+        const character_name_key = cleanName(r.character_name_key || toCharKey(character_name));
+        const month = Number(r.month);
+        const day = Number(r.day);
+        const image_url = cleanName(r.image_url || "") || null;
+
+        if (!user_id || !character_name || !character_name_key) continue;
+        if (!(month >= 1 && month <= 12)) continue;
+        if (!(day >= 1 && day <= 31)) continue;
+
+        rowsToImport.push({ user_id, character_name, character_name_key, month, day, image_url });
+      }
+    }
+    // If it's list-of-rows directly
+    else if (Array.isArray(payload)) {
+      for (const r of payload) {
+        if (!isRowFormat(r)) continue;
+        const user_id = String(r.user_id);
+        const character_name = cleanName(r.character_name);
+        const character_name_key = cleanName(r.character_name_key || toCharKey(character_name));
+        const month = Number(r.month);
+        const day = Number(r.day);
+        const image_url = cleanName(r.image_url || "") || null;
+
+        if (!user_id || !character_name || !character_name_key) continue;
+        if (!(month >= 1 && month <= 12)) continue;
+        if (!(day >= 1 && day <= 31)) continue;
+
+        rowsToImport.push({ user_id, character_name, character_name_key, month, day, image_url });
+      }
+    }
+    // Legacy dict format
+    else if (isLegacyFormat(payload)) {
+      for (const [uid, list] of Object.entries(payload)) {
+        if (!Array.isArray(list)) continue;
+        for (const entry of list) {
+          const parsed = parseLegacyEntry(entry);
+          if (!parsed) continue;
+          rowsToImport.push({ user_id: String(uid), ...parsed });
+        }
+      }
+    } else {
+      return res.status(400).send("Unrecognized JSON format.");
+    }
+
+    if (!rowsToImport.length) {
+      return res.status(400).send("No valid rows found in JSON.");
+    }
+
+    // Import using a transaction + batch upserts
+    const client = await pool.connect();
+    let imported = 0;
+
+    try {
+      await client.query("BEGIN");
+
+      // Make sure unique index exists (required for ON CONFLICT to work)
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS birthdays_user_char_key_unique
+        ON ${TBL} (user_id, character_name_key);
+      `);
+
+      for (const r of rowsToImport) {
+        await client.query(
+          `
+          INSERT INTO ${TBL} (user_id, character_name, character_name_key, month, day, image_url, updated_at)
+          VALUES ($1,$2,$3,$4,$5,$6, now())
+          ON CONFLICT (user_id, character_name_key)
+          DO UPDATE SET
+            character_name = EXCLUDED.character_name,
+            month = EXCLUDED.month,
+            day = EXCLUDED.day,
+            image_url = EXCLUDED.image_url,
+            updated_at = now()
+          `,
+          [r.user_id, r.character_name, r.character_name_key, r.month, r.day, r.image_url]
+        );
+
+        imported += 1;
+      }
+
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    res.send(`
+      <!doctype html>
+      <html><body style="font-family: system-ui; padding:24px;">
+        <p><a href="/">← Home</a> • <a href="/admin/birthdays">Admin Birthdays</a></p>
+        <h2>Import complete</h2>
+        <p>Imported/updated rows: <b>${imported}</b></p>
+      </body></html>
+    `);
+  } catch (e) {
+    console.error("[IMPORT] error:", e);
+    res.status(500).send(`Import failed: ${escapeHtml(e.message || String(e))}`);
+  }
+});
+
+
 // ---------------- Start ----------------
 app.listen(PORT, () => {
   console.log(`[WEB] listening on :${PORT}`);
