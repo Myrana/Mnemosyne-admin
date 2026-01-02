@@ -319,20 +319,6 @@ app.get("/", (req, res) => {
   `);
 });
 
-app.get("/health", async (req, res) => {
-  try {
-    await pool.query("SELECT 1");
-    res.json({
-      ok: true,
-      table: BIRTHDAYS_TABLE,
-      authed: Boolean(req.session.user),
-      is_admin: Boolean(req.session.user?.is_admin),
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
-  }
-});
-
 // OAuth start
 app.get("/login", (req, res) => {
   const state = randomState();
@@ -563,59 +549,50 @@ app.get("/admin/birthdays", mustBeAdmin, async (req, res) => {
   );
 
   res.setHeader("content-type", "text/html; charset=utf-8");
-  res.send(`
-    <!doctype html>
-    <html>
-      <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Admin Birthdays</title></head>
-      <body style="font-family: system-ui; padding: 24px;">
-        <p><a href="/">← Home</a> &nbsp; | &nbsp; <a href="/admin/search">Admin Search</a></p>
-        <h2>Admin: All Birthdays</h2>
+res.send(`
+  <!doctype html>
+  <html>
+    <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Admin Birthdays</title></head>
+    <body style="font-family: system-ui; padding: 24px;">
+      <p><a href="/">← Home</a></p>
 
-        <h3>Admin Add (Option B — raw Discord user ID)</h3>
-        <form method="POST" action="/admin/birthdays/add">
-          <div><label>Discord User ID<br/><input name="user_id" required style="width: 360px"/></label></div>
-          <div><label>Character Name<br/><input name="character_name" required style="width: 360px"/></label></div>
-          <div><label>Date (MM-DD)<br/><input name="mmdd" placeholder="07-12" required style="width: 120px"/></label></div>
-          <div><label>Image URL<br/><input name="image_url" style="width: 560px"/></label></div>
-          <button type="submit">Add for user</button>
-        </form>
+      <h2>Admin: All Birthdays</h2>
 
-        <hr/>
+      <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin: 10px 0 16px;">
+        <a href="/admin/export.json" style="padding:8px 12px; border:1px solid #ccc; border-radius:8px; text-decoration:none;">
+          ⬇️ Download JSON backup
+        </a>
+        <a href="/admin/import" style="padding:8px 12px; border:1px solid #ccc; border-radius:8px; text-decoration:none;">
+          ⬆️ Import JSON backup
+        </a>
+      </div>
 
-        <p>Total rows: <b>${rows.length}</b></p>
+      <p>Total: ${rows.length}</p>
 
-        ${
-          rows.length
-            ? `
-          <table border="1" cellpadding="8" cellspacing="0">
-            <thead><tr><th>User ID</th><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
-            <tbody>
-              ${rows
-                .map(
-                  (r) => `
-                <tr>
-                  <td>${escapeHtml(r.user_id)}</td>
-                  <td>${escapeHtml(r.character_name)}</td>
-                  <td>${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}</td>
-                  <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank">link</a>` : ""}</td>
-                  <td>
-                    <form method="POST" action="/admin/birthdays/${r.id}/delete" style="display:inline;">
-                      <button type="submit" onclick="return confirm('Admin delete this birthday?')">Delete</button>
-                    </form>
-                  </td>
-                </tr>
-              `
-                )
-                .join("")}
-            </tbody>
-          </table>
-        `
-            : `<p>No rows.</p>`
-        }
-      </body>
-    </html>
-  `);
-});
+      ${rows.length ? `
+        <table border="1" cellpadding="8" cellspacing="0">
+          <thead><tr><th>User ID</th><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr>
+                <td>${escapeHtml(r.user_id)}</td>
+                <td>${escapeHtml(r.character_name)}</td>
+                <td>${String(r.month).padStart(2,"0")}-${String(r.day).padStart(2,"0")}</td>
+                <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank">link</a>` : ""}</td>
+                <td>
+                  <form method="POST" action="/admin/birthdays/${r.id}/delete" style="display:inline;">
+                    <button type="submit" onclick="return confirm('Admin delete this birthday?')">Delete</button>
+                  </form>
+                </td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      ` : `<p>No rows.</p>`}
+    </body>
+  </html>
+`);
+
 
 app.post("/admin/birthdays/add", mustBeAdmin, async (req, res) => {
   try {
