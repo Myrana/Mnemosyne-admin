@@ -1,20 +1,23 @@
 /**
  * index.js — Mnemosyne Admin (Railway) — FULL FILE (Option B)
  *
- * What this version does:
+ * Features:
  * - Discord OAuth login (no redirect loop)
  * - Postgres-backed sessions (connect-pg-simple) with auto table creation
  * - Birthdays CRUD
  *   - /me/birthdays : user view/add/edit/delete (only their own rows)
  *   - /admin/birthdays : admin view + admin add for ANY Discord user ID (Option B) + admin delete
  *   - /admin/search : admin search by user_id or character_name
- * - Admin Tools links added everywhere admin lands:
- *   - Export JSON: /admin/export.json
- *   - Import UI:  /admin/import
+ * - Admin backup/restore
+ *   - /admin/export.json : download JSON
+ *   - /admin/import      : paste JSON to upsert rows back in
+ * - UI improvements:
+ *   - Light/Dark/Auto theme toggle (localStorage)
+ *   - No duplicated admin links; "Admin Tools" card is the single source of admin links
  *
- * IMPORTANT (your schema):
- * - Your "birthdays" table must have a NOT NULL "character_name_key".
- *   This file ensures the column exists and backfills it from character_name.
+ * IMPORTANT (schema):
+ * - Table defaults to "birthdays" (lowercase)
+ * - Must have NOT NULL character_name_key (this file will add/backfill it safely if missing)
  *
  * ENV REQUIRED:
  *   DATABASE_URL
@@ -22,7 +25,7 @@
  *   DISCORD_CLIENT_SECRET
  *   DISCORD_REDIRECT_URI     e.g. https://YOUR-SERVICE.up.railway.app/callback
  *   DISCORD_GUILD_ID
- *   BOT_TOKEN               (Discord bot token; used to look up guild roles)
+ *   BOT_TOKEN               (Discord bot token; used to look up guild member roles)
  *   SESSION_SECRET
  *
  * OPTIONAL:
@@ -153,11 +156,200 @@ function tableIdent(name) {
 
 const TBL = tableIdent(BIRTHDAYS_TABLE);
 
-function adminToolsLinks() {
+// ---------------- UI helpers (theme + shell) ----------------
+function baseCss() {
   return `
-    <div style="margin: 12px 0; padding: 12px; border: 1px solid #ddd; border-radius: 10px;">
+  <style>
+    :root{
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --fg: #111111;
+      --muted: #555;
+      --card: #f6f6f6;
+      --border: #dddddd;
+      --link: #1a73e8;
+      --btn-bg: #111;
+      --btn-fg: #fff;
+      --input-bg: #fff;
+      --input-fg: #111;
+      --danger: #c62828;
+    }
+
+    /* OS dark mode default */
+    @media (prefers-color-scheme: dark){
+      :root{
+        --bg: #0b0d10;
+        --fg: #e8e8e8;
+        --muted: #b4b4b4;
+        --card: #11141a;
+        --border: #2a2f3a;
+        --link: #8ab4f8;
+        --btn-bg: #e8e8e8;
+        --btn-fg: #0b0d10;
+        --input-bg: #0f131a;
+        --input-fg: #e8e8e8;
+        --danger: #ff6b6b;
+      }
+    }
+
+    /* Manual override via <html data-theme="light|dark"> */
+    html[data-theme="light"]{
+      --bg: #ffffff;
+      --fg: #111111;
+      --muted: #555;
+      --card: #f6f6f6;
+      --border: #dddddd;
+      --link: #1a73e8;
+      --btn-bg: #111;
+      --btn-fg: #fff;
+      --input-bg: #fff;
+      --input-fg: #111;
+      --danger: #c62828;
+    }
+    html[data-theme="dark"]{
+      --bg: #0b0d10;
+      --fg: #e8e8e8;
+      --muted: #b4b4b4;
+      --card: #11141a;
+      --border: #2a2f3a;
+      --link: #8ab4f8;
+      --btn-bg: #e8e8e8;
+      --btn-fg: #0b0d10;
+      --input-bg: #0f131a;
+      --input-fg: #e8e8e8;
+      --danger: #ff6b6b;
+    }
+
+    body{
+      background: var(--bg);
+      color: var(--fg);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      padding: 24px;
+      margin: 0;
+      line-height: 1.35;
+    }
+
+    a{ color: var(--link); }
+    hr{ border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
+
+    .row{ display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+    .muted{ color: var(--muted); }
+    .small{ font-size: 0.95rem; }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+
+    .card{
+      border: 1px solid var(--border);
+      background: var(--card);
+      border-radius: 12px;
+      padding: 12px;
+      margin: 12px 0;
+    }
+
+    .btn{
+      background: var(--btn-bg);
+      color: var(--btn-fg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    .btn.danger{
+      border-color: var(--danger);
+    }
+
+    input, textarea, select{
+      background: var(--input-bg);
+      color: var(--input-fg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      outline: none;
+    }
+
+    table{
+      border-collapse: collapse;
+      width: 100%;
+      max-width: 1100px;
+    }
+    th, td{
+      border: 1px solid var(--border);
+      padding: 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th{ background: color-mix(in oklab, var(--card) 85%, var(--bg)); }
+
+    .links{ display:flex; gap:12px; flex-wrap:wrap; margin-top:8px; }
+    details summary{ cursor: pointer; font-weight: 600; }
+  </style>
+  `;
+}
+
+function themeToggleScript() {
+  return `
+  <script>
+    (function(){
+      const KEY = "mnemo_theme"; // "light" | "dark" | null
+      const saved = localStorage.getItem(KEY);
+      if (saved === "light" || saved === "dark") {
+        document.documentElement.setAttribute("data-theme", saved);
+      }
+
+      window.__mnemoTheme = {
+        get() { return document.documentElement.getAttribute("data-theme") || ""; },
+        set(next) {
+          if (next === "light" || next === "dark") {
+            document.documentElement.setAttribute("data-theme", next);
+            localStorage.setItem(KEY, next);
+          } else {
+            document.documentElement.removeAttribute("data-theme");
+            localStorage.removeItem(KEY);
+          }
+        },
+        toggle() {
+          const cur = this.get();
+          this.set(cur === "dark" ? "light" : "dark");
+        }
+      };
+    })();
+  </script>
+  `;
+}
+
+function themeToggleButton() {
+  return `
+    <button class="btn" type="button" id="themeToggle">Toggle theme</button>
+    <script>
+      (function(){
+        const btn = document.getElementById("themeToggle");
+        if (!btn) return;
+
+        function label(){
+          const cur = window.__mnemoTheme?.get?.() || "";
+          btn.textContent = cur ? ("Theme: " + cur + " (click)") : "Theme: auto (click)";
+        }
+
+        btn.addEventListener("click", function(){
+          const cur = window.__mnemoTheme.get();
+          if (!cur) window.__mnemoTheme.set("dark");
+          else window.__mnemoTheme.toggle();
+          label();
+        });
+
+        label();
+      })();
+    </script>
+  `;
+}
+
+function adminToolsLinks(user) {
+  if (!user?.is_admin) return "";
+  return `
+    <div class="card">
       <b>Admin Tools</b>
-      <div style="margin-top: 8px; display:flex; gap:12px; flex-wrap: wrap;">
+      <div class="links">
         <a href="/admin/birthdays">All Birthdays</a>
         <a href="/admin/search">Search</a>
         <a href="/admin/export.json">Export JSON</a>
@@ -167,9 +359,35 @@ function adminToolsLinks() {
   `;
 }
 
+function renderPage({ title, user, bodyHtml }) {
+  return `
+  <!doctype html>
+  <html>
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width,initial-scale=1" />
+      <title>${escapeHtml(title || "Mnemosyne Admin")}</title>
+      ${baseCss()}
+      ${themeToggleScript()}
+    </head>
+    <body>
+      <div class="row">
+        <h1 style="margin:0;">${escapeHtml(title || "Mnemosyne Admin")}</h1>
+        ${themeToggleButton()}
+      </div>
+
+      ${bodyHtml || ""}
+
+      <hr/>
+      <p class="small"><a href="/health">Health</a></p>
+    </body>
+  </html>
+  `;
+}
+
 // ---------------- Schema ensure ----------------
 async function ensureSchema() {
-  // 1) Dedupe table (optional but harmless)
+  // 1) Dedupe table (optional)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS birthday_shouts (
       shout_date date NOT NULL,
@@ -195,8 +413,7 @@ async function ensureSchema() {
     );
   `);
 
-  // 3) If table already existed without character_name_key, add it + backfill safely
-  //    Also ensures NOT NULL (only after backfill).
+  // 3) Ensure character_name_key exists, backfill, then enforce NOT NULL if safe
   await pool.query(`
     DO $$
     BEGIN
@@ -207,12 +424,10 @@ async function ensureSchema() {
         ALTER TABLE ${TBL} ADD COLUMN character_name_key text;
       END IF;
 
-      -- Backfill any null/blank keys from character_name
       UPDATE ${TBL}
       SET character_name_key = lower(btrim(regexp_replace(coalesce(character_name,''), '\\s+', ' ', 'g')))
       WHERE character_name_key IS NULL OR btrim(character_name_key) = '';
 
-      -- If still any nulls, don't force NOT NULL (would fail). Otherwise enforce.
       IF NOT EXISTS (
         SELECT 1 FROM ${TBL}
         WHERE character_name_key IS NULL OR btrim(character_name_key) = ''
@@ -222,16 +437,20 @@ async function ensureSchema() {
     END $$;
   `);
 
-  // 4) Unique index to support ON CONFLICT (user_id, character_name_key)
+  // 4) Unique index for upsert
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS birthdays_user_char_key_unique
     ON ${TBL} (user_id, character_name_key);
   `);
 
-  // 5) Helpful index for sorting/searching
+  // 5) Helpful indexes
   await pool.query(`
     CREATE INDEX IF NOT EXISTS birthdays_mmdd_idx
     ON ${TBL} (month, day);
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS birthdays_user_id_idx
+    ON ${TBL} (user_id);
   `);
 }
 
@@ -279,7 +498,6 @@ async function discordGetMemberRoles(userId) {
 
   const text = await r.text();
   if (!r.ok) {
-    // if user isn't in server, treat as no roles
     console.warn("[DISCORD] member lookup failed:", r.status, text);
     return [];
   }
@@ -289,54 +507,36 @@ async function discordGetMemberRoles(userId) {
 }
 
 // ---------------- Routes ----------------
+
+// Home (no duplicate admin links; Admin Tools card is the canonical list)
 app.get("/", (req, res) => {
   const user = req.session.user || null;
 
+  const bodyHtml = user
+    ? `
+      <p class="muted" style="margin-top:8px;">
+        Logged in as <b>${escapeHtml(user.username)}</b> ${user.is_admin ? "(admin)" : ""}
+      </p>
+
+      <div class="card">
+        <b>Quick Links</b>
+        <div class="links">
+          <a href="/me/birthdays">My birthdays</a>
+          <a href="/logout">Logout</a>
+        </div>
+      </div>
+
+      ${adminToolsLinks(user)}
+    `
+    : `
+      <p class="muted">You are not logged in.</p>
+      <div class="card">
+        <a href="/login">Login with Discord</a>
+      </div>
+    `;
+
   res.setHeader("content-type", "text/html; charset=utf-8");
-  res.send(`
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width,initial-scale=1" />
-        <title>Mnemosyne Admin</title>
-      </head>
-      <body style="font-family: system-ui; padding: 24px;">
-        <h1>Mnemosyne Admin</h1>
-
-        ${
-          user
-            ? `
-          <p>Logged in as <b>${escapeHtml(user.username)}</b> ${
-                user.is_admin ? "(admin)" : ""
-              }</p>
-          <ul>
-            <li><a href="/me/birthdays">My birthdays</a></li>
-            ${
-              user.is_admin
-                ? `
-              <li><a href="/admin/birthdays">Admin: all birthdays</a></li>
-              <li><a href="/admin/search">Admin: search</a></li>
-              <li><a href="/admin/export.json">Admin: export JSON</a></li>
-              <li><a href="/admin/import">Admin: import JSON</a></li>
-            `
-                : ""
-            }
-            <li><a href="/logout">Logout</a></li>
-          </ul>
-          ${user.is_admin ? adminToolsLinks() : ""}
-        `
-            : `
-          <p>You are not logged in.</p>
-          <p><a href="/login">Login with Discord</a></p>
-        `
-        }
-
-        <hr/>
-        <p><a href="/health">Health</a></p>
-      </body>
-    </html>
-  `);
+  res.send(renderPage({ title: "Mnemosyne Admin", user, bodyHtml }));
 });
 
 app.get("/health", async (req, res) => {
@@ -416,7 +616,8 @@ app.get("/logout", (req, res) => {
 
 // ---------------- Per-user birthdays ----------------
 app.get("/me/birthdays", mustBeAuthed, async (req, res) => {
-  const userId = String(req.session.user.id);
+  const user = req.session.user;
+  const userId = String(user.id);
 
   const { rows } = await pool.query(
     `SELECT id, character_name, month, day, image_url
@@ -426,65 +627,85 @@ app.get("/me/birthdays", mustBeAuthed, async (req, res) => {
     [userId]
   );
 
-  res.setHeader("content-type", "text/html; charset=utf-8");
-  res.send(`
-    <!doctype html>
-    <html>
-      <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>My Birthdays</title></head>
-      <body style="font-family: system-ui; padding: 24px;">
-        <p><a href="/">← Home</a></p>
-        <h2>My Birthdays</h2>
+  const bodyHtml = `
+    <p><a href="/">← Home</a></p>
+    <p class="muted">Logged in as <b>${escapeHtml(user.username)}</b>${user.is_admin ? " (admin)" : ""}</p>
 
-        <h3>Add</h3>
-        <form method="POST" action="/me/birthdays">
-          <div><label>Character Name<br/><input name="character_name" required style="width: 360px"/></label></div>
-          <div><label>Date (MM-DD)<br/><input name="mmdd" placeholder="07-12" required style="width: 120px"/></label></div>
-          <div><label>Image URL<br/><input name="image_url" style="width: 560px"/></label></div>
-          <button type="submit">Add</button>
-        </form>
+    <div class="card">
+      <b>Add birthday</b>
+      <form method="POST" action="/me/birthdays" style="margin-top:10px;">
+        <div style="margin: 8px 0;">
+          <label>Character Name<br/>
+            <input name="character_name" required style="width: min(520px, 95vw)"/>
+          </label>
+        </div>
+        <div style="margin: 8px 0;">
+          <label>Date (MM-DD)<br/>
+            <input name="mmdd" placeholder="07-12" required style="width: 140px"/>
+          </label>
+        </div>
+        <div style="margin: 8px 0;">
+          <label>Image URL (optional)<br/>
+            <input name="image_url" style="width: min(820px, 95vw)"/>
+          </label>
+        </div>
+        <button class="btn" type="submit">Add</button>
+      </form>
+    </div>
 
-        <hr/>
-
-        <h3>List</h3>
-        ${
-          rows.length
-            ? `
-          <table border="1" cellpadding="8" cellspacing="0">
+    ${rows.length ? `
+      <div class="card">
+        <b>My saved birthdays</b>
+        <div style="margin-top:10px; overflow:auto;">
+          <table>
             <thead><tr><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
             <tbody>
-              ${rows
-                .map(
-                  (r) => `
+              ${rows.map(r => `
                 <tr>
                   <td>${escapeHtml(r.character_name)}</td>
-                  <td>${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}</td>
-                  <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank">link</a>` : ""}</td>
+                  <td class="mono">${String(r.month).padStart(2,"0")}-${String(r.day).padStart(2,"0")}</td>
+                  <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank" rel="noreferrer">link</a>` : ""}</td>
                   <td>
                     <form method="POST" action="/me/birthdays/${r.id}/delete" style="display:inline;">
-                      <button type="submit" onclick="return confirm('Delete this birthday?')">Delete</button>
+                      <button class="btn danger" type="submit" onclick="return confirm('Delete this birthday?')">Delete</button>
                     </form>
-                    <details style="display:inline-block; margin-left: 8px;">
+                    <details style="display:inline-block; margin-left: 10px;">
                       <summary>Edit</summary>
-                      <form method="POST" action="/me/birthdays/${r.id}/edit">
-                        <div><label>Name<br/><input name="character_name" value="${escapeHtml(r.character_name)}" required/></label></div>
-                        <div><label>MM-DD<br/><input name="mmdd" value="${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}" required/></label></div>
-                        <div><label>Image URL<br/><input name="image_url" value="${escapeHtml(r.image_url || "")}" style="width: 460px"/></label></div>
-                        <button type="submit">Save</button>
+                      <form method="POST" action="/me/birthdays/${r.id}/edit" style="margin-top:8px;">
+                        <div style="margin: 6px 0;">
+                          <label>Name<br/>
+                            <input name="character_name" value="${escapeHtml(r.character_name)}" required style="width: 320px"/>
+                          </label>
+                        </div>
+                        <div style="margin: 6px 0;">
+                          <label>MM-DD<br/>
+                            <input name="mmdd" value="${String(r.month).padStart(2,"0")}-${String(r.day).padStart(2,"0")}" required style="width: 140px"/>
+                          </label>
+                        </div>
+                        <div style="margin: 6px 0;">
+                          <label>Image URL<br/>
+                            <input name="image_url" value="${escapeHtml(r.image_url || "")}" style="width: min(720px, 95vw)"/>
+                          </label>
+                        </div>
+                        <button class="btn" type="submit">Save</button>
                       </form>
                     </details>
                   </td>
                 </tr>
-              `
-                )
-                .join("")}
+              `).join("")}
             </tbody>
           </table>
-        `
-            : `<p>No birthdays yet.</p>`
-        }
-      </body>
-    </html>
-  `);
+        </div>
+      </div>
+    ` : `
+      <div class="card"><b>No birthdays yet.</b> Add one above.</div>
+    `}
+
+    ${adminToolsLinks(user)}
+  `;
+
+  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.send(renderPage({ title: "My Birthdays", user, bodyHtml }));
 });
 
 app.post("/me/birthdays", mustBeAuthed, async (req, res) => {
@@ -575,471 +796,61 @@ app.post("/me/birthdays/:id/delete", mustBeAuthed, async (req, res) => {
 
 // ---------------- Admin: all birthdays + Option B add (raw user id) ----------------
 app.get("/admin/birthdays", mustBeAdmin, async (req, res) => {
+  const user = req.session.user;
+
   const { rows } = await pool.query(
     `SELECT id, user_id, character_name, month, day, image_url
      FROM ${TBL}
      ORDER BY month ASC, day ASC, character_name_key ASC`
   );
 
-  res.setHeader("content-type", "text/html; charset=utf-8");
-  res.send(`
-    <!doctype html>
-    <html>
-      <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Admin Birthdays</title></head>
-      <body style="font-family: system-ui; padding: 24px;">
-        <p>
-          <a href="/">← Home</a> &nbsp; | &nbsp;
-          <a href="/admin/search">Admin Search</a> &nbsp; | &nbsp;
-          <a href="/admin/export.json">Export JSON</a> &nbsp; | &nbsp;
-          <a href="/admin/import">Import JSON</a>
-        </p>
+  const bodyHtml = `
+    <p><a href="/">← Home</a></p>
+    <p class="muted">Logged in as <b>${escapeHtml(user.username)}</b> (admin)</p>
 
-        ${adminToolsLinks()}
+    ${adminToolsLinks(user)}
 
-        <h2>Admin: All Birthdays</h2>
+    <div class="card">
+      <b>Admin Add (Option B — raw Discord user ID)</b>
+      <form method="POST" action="/admin/birthdays/add" style="margin-top:10px;">
+        <div style="margin: 8px 0;">
+          <label>Discord User ID<br/>
+            <input name="user_id" required style="width: min(520px, 95vw)"/>
+          </label>
+        </div>
+        <div style="margin: 8px 0;">
+          <label>Character Name<br/>
+            <input name="character_name" required style="width: min(520px, 95vw)"/>
+          </label>
+        </div>
+        <div style="margin: 8px 0;">
+          <label>Date (MM-DD)<br/>
+            <input name="mmdd" placeholder="07-12" required style="width: 140px"/>
+          </label>
+        </div>
+        <div style="margin: 8px 0;">
+          <label>Image URL (optional)<br/>
+            <input name="image_url" style="width: min(820px, 95vw)"/>
+          </label>
+        </div>
+        <button class="btn" type="submit">Add for user</button>
+      </form>
+    </div>
 
-        <h3>Admin Add (Option B — raw Discord user ID)</h3>
-        <form method="POST" action="/admin/birthdays/add">
-          <div><label>Discord User ID<br/><input name="user_id" required style="width: 360px"/></label></div>
-          <div><label>Character Name<br/><input name="character_name" required style="width: 360px"/></label></div>
-          <div><label>Date (MM-DD)<br/><input name="mmdd" placeholder="07-12" required style="width: 120px"/></label></div>
-          <div><label>Image URL<br/><input name="image_url" style="width: 560px"/></label></div>
-          <button type="submit">Add for user</button>
-        </form>
-
-        <hr/>
-
-        <p>Total rows: <b>${rows.length}</b></p>
-
-        ${
-          rows.length
-            ? `
-          <table border="1" cellpadding="8" cellspacing="0">
+    <div class="card">
+      <b>All birthdays</b>
+      <div class="muted small" style="margin-top:6px;">Total rows: <b>${rows.length}</b></div>
+      <div style="margin-top:10px; overflow:auto;">
+        ${rows.length ? `
+          <table>
             <thead><tr><th>User ID</th><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
             <tbody>
-              ${rows
-                .map(
-                  (r) => `
+              ${rows.map(r => `
                 <tr>
-                  <td>${escapeHtml(r.user_id)}</td>
+                  <td class="mono">${escapeHtml(r.user_id)}</td>
                   <td>${escapeHtml(r.character_name)}</td>
-                  <td>${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}</td>
-                  <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank">link</a>` : ""}</td>
+                  <td class="mono">${String(r.month).padStart(2,"0")}-${String(r.day).padStart(2,"0")}</td>
+                  <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank" rel="noreferrer">link</a>` : ""}</td>
                   <td>
                     <form method="POST" action="/admin/birthdays/${r.id}/delete" style="display:inline;">
-                      <button type="submit" onclick="return confirm('Admin delete this birthday?')">Delete</button>
-                    </form>
-                  </td>
-                </tr>
-              `
-                )
-                .join("")}
-            </tbody>
-          </table>
-        `
-            : `<p>No rows.</p>`
-        }
-      </body>
-    </html>
-  `);
-});
-
-app.post("/admin/birthdays/add", mustBeAdmin, async (req, res) => {
-  try {
-    const targetUserId = String(req.body.user_id || "").trim();
-    const character_name = cleanName(req.body.character_name);
-    const mmdd = String(req.body.mmdd || "");
-    const image_url = cleanName(req.body.image_url || "");
-
-    if (!targetUserId) return res.status(400).send("Missing user_id");
-    if (!/^\d{15,25}$/.test(targetUserId))
-      return res.status(400).send("user_id should be a Discord numeric ID");
-    if (!character_name) return res.status(400).send("Missing character_name");
-    if (!mmddValid(mmdd)) return res.status(400).send("Invalid mmdd (use MM-DD)");
-
-    const [m, d] = parseMmdd(mmdd);
-    const character_name_key = charKey(character_name);
-
-    await pool.query(
-      `
-      INSERT INTO ${TBL} (user_id, character_name, character_name_key, month, day, image_url, updated_at)
-      VALUES ($1, $2, $3, $4, $5, NULLIF($6,''), now())
-      ON CONFLICT (user_id, character_name_key)
-      DO UPDATE SET
-        character_name = EXCLUDED.character_name,
-        month = EXCLUDED.month,
-        day = EXCLUDED.day,
-        image_url = EXCLUDED.image_url,
-        updated_at = now()
-      `,
-      [targetUserId, character_name, character_name_key, m, d, image_url]
-    );
-
-    res.redirect("/admin/birthdays");
-  } catch (e) {
-    console.error("[ADMIN ADD] error:", e);
-    res.status(500).send(`Admin add failed: ${escapeHtml(e.message)}`);
-  }
-});
-
-app.post("/admin/birthdays/:id/delete", mustBeAdmin, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!id) return res.status(400).send("Bad id");
-
-    await pool.query(`DELETE FROM ${TBL} WHERE id=$1`, [id]);
-    res.redirect("/admin/birthdays");
-  } catch (e) {
-    console.error("[ADMIN DEL] error:", e);
-    res.status(500).send(`Admin delete failed: ${escapeHtml(e.message)}`);
-  }
-});
-
-// ---------------- Admin search ----------------
-app.get("/admin/search", mustBeAdmin, async (req, res) => {
-  const q = String(req.query.q || "").trim();
-  let rows = [];
-
-  if (q) {
-    if (/^\d{15,25}$/.test(q)) {
-      const r = await pool.query(
-        `SELECT id, user_id, character_name, month, day, image_url
-         FROM ${TBL}
-         WHERE user_id=$1
-         ORDER BY month ASC, day ASC, character_name_key ASC`,
-        [q]
-      );
-      rows = r.rows;
-    } else {
-      const r = await pool.query(
-        `SELECT id, user_id, character_name, month, day, image_url
-         FROM ${TBL}
-         WHERE character_name ILIKE $1
-         ORDER BY month ASC, day ASC, character_name_key ASC
-         LIMIT 200`,
-        [`%${q}%`]
-      );
-      rows = r.rows;
-    }
-  }
-
-  res.setHeader("content-type", "text/html; charset=utf-8");
-  res.send(`
-    <!doctype html>
-    <html>
-      <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Admin Search</title></head>
-      <body style="font-family: system-ui; padding: 24px;">
-        <p>
-          <a href="/">← Home</a> &nbsp; | &nbsp;
-          <a href="/admin/birthdays">Admin Birthdays</a> &nbsp; | &nbsp;
-          <a href="/admin/export.json">Export JSON</a> &nbsp; | &nbsp;
-          <a href="/admin/import">Import JSON</a>
-        </p>
-
-        ${adminToolsLinks()}
-
-        <h2>Admin Search</h2>
-
-        <form method="GET" action="/admin/search">
-          <div>
-            <label>Search (Discord user id OR character name)</label><br/>
-            <input name="q" value="${escapeHtml(q)}" style="width: 420px"/>
-            <button type="submit">Search</button>
-          </div>
-        </form>
-
-        <hr/>
-
-        ${
-          q
-            ? `<p>Results for <b>${escapeHtml(q)}</b>: ${rows.length}</p>`
-            : `<p>Enter a user id (numbers) or a character name.</p>`
-        }
-
-        ${
-          rows.length
-            ? `
-          <table border="1" cellpadding="8" cellspacing="0">
-            <thead><tr><th>User ID</th><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
-            <tbody>
-              ${rows
-                .map(
-                  (r) => `
-                <tr>
-                  <td>${escapeHtml(r.user_id)}</td>
-                  <td>${escapeHtml(r.character_name)}</td>
-                  <td>${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}</td>
-                  <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank">link</a>` : ""}</td>
-                  <td>
-                    <form method="POST" action="/admin/birthdays/${r.id}/delete" style="display:inline;">
-                      <button type="submit" onclick="return confirm('Admin delete this birthday?')">Delete</button>
-                    </form>
-                  </td>
-                </tr>
-              `
-                )
-                .join("")}
-            </tbody>
-          </table>
-        `
-            : q
-            ? `<p>No matches.</p>`
-            : ``
-        }
-      </body>
-    </html>
-  `);
-});
-
-// ---------- Backup/Restore helpers ----------
-function toCharKey(name) {
-  return cleanName(name).toLowerCase();
-}
-
-function isRowFormat(obj) {
-  return obj && typeof obj === "object" && "user_id" in obj && "character_name" in obj;
-}
-
-function isLegacyFormat(obj) {
-  return obj && typeof obj === "object" && !Array.isArray(obj);
-}
-
-function parseLegacyEntry(entry) {
-  if (!Array.isArray(entry) || entry.length < 2) return null;
-  const character_name = cleanName(entry[0]);
-  const mmdd = String(entry[1] || "");
-  const image_url = cleanName(entry[2] || "");
-
-  if (!character_name) return null;
-  if (!mmddValid(mmdd)) return null;
-
-  const [m, d] = mmdd.split("-").map((x) => Number(x));
-  return {
-    character_name,
-    character_name_key: toCharKey(character_name),
-    month: m,
-    day: d,
-    image_url: image_url || null,
-  };
-}
-
-// ---------- Admin JSON export ----------
-app.get("/admin/export.json", mustBeAdmin, async (req, res) => {
-  const { rows } = await pool.query(
-    `SELECT user_id, character_name, character_name_key, month, day, image_url
-     FROM ${TBL}
-     ORDER BY user_id ASC, month ASC, day ASC, character_name_key ASC`
-  );
-
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  res.setHeader("content-type", "application/json; charset=utf-8");
-  res.setHeader("content-disposition", `attachment; filename="mnemosyne-backup-${stamp}.json"`);
-
-  res.send(
-    JSON.stringify(
-      {
-        exported_at: new Date().toISOString(),
-        table: BIRTHDAYS_TABLE,
-        count: rows.length,
-        rows,
-      },
-      null,
-      2
-    )
-  );
-});
-
-// ---------- Admin import UI ----------
-app.get("/admin/import", mustBeAdmin, async (req, res) => {
-  res.setHeader("content-type", "text/html; charset=utf-8");
-  res.send(`
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8"/>
-        <meta name="viewport" content="width=device-width,initial-scale=1"/>
-        <title>Admin Import</title>
-      </head>
-      <body style="font-family: system-ui; padding: 24px;">
-        <p>
-          <a href="/">← Home</a> &nbsp; | &nbsp;
-          <a href="/admin/birthdays">Admin Birthdays</a> &nbsp; | &nbsp;
-          <a href="/admin/search">Admin Search</a> &nbsp; | &nbsp;
-          <a href="/admin/export.json">Export JSON</a>
-        </p>
-
-        ${adminToolsLinks()}
-
-        <h2>Admin: Import JSON Backup</h2>
-
-        <p><b>WARNING:</b> This will <b>upsert</b> rows into the database (insert new + update existing).
-        It will not delete rows that are not present in the import.</p>
-
-        <form method="POST" action="/admin/import">
-          <div>
-            <label>Paste JSON backup here:</label><br/>
-            <textarea name="json" rows="18" style="width: min(920px, 95vw);" required></textarea>
-          </div>
-          <div style="margin-top: 12px;">
-            <label><input type="checkbox" name="confirm" value="yes" required/>
-              I understand this will modify the database.
-            </label>
-          </div>
-          <div style="margin-top: 12px;">
-            <button type="submit">Import</button>
-          </div>
-        </form>
-
-        <hr/>
-        <h3>Supported JSON Formats</h3>
-        <pre style="background:#f6f6f6;padding:12px;border-radius:8px;overflow:auto;">
-1) Export format from this site:
-{
-  "exported_at":"...",
-  "table":"birthdays",
-  "count": 123,
-  "rows":[
-    {"user_id":"...","character_name":"...","character_name_key":"...","month":1,"day":2,"image_url":"..."}
-  ]
-}
-
-2) Legacy bot JSON:
-{
-  "1234567890123": [
-    ["Cash Langston","07-12","https://...png"]
-  ]
-}
-        </pre>
-      </body>
-    </html>
-  `);
-});
-
-// ---------- Admin import handler ----------
-app.post("/admin/import", mustBeAdmin, async (req, res) => {
-  try {
-    if (req.body.confirm !== "yes") return res.status(400).send("Missing confirmation checkbox.");
-
-    const raw = String(req.body.json || "").trim();
-    if (!raw) return res.status(400).send("Missing JSON body.");
-
-    let payload;
-    try {
-      payload = JSON.parse(raw);
-    } catch {
-      return res.status(400).send("Invalid JSON.");
-    }
-
-    let rowsToImport = [];
-
-    if (payload && typeof payload === "object" && Array.isArray(payload.rows)) {
-      for (const r of payload.rows) {
-        if (!isRowFormat(r)) continue;
-        const user_id = String(r.user_id);
-        const character_name = cleanName(r.character_name);
-        const character_name_key = cleanName(r.character_name_key || toCharKey(character_name));
-        const month = Number(r.month);
-        const day = Number(r.day);
-        const image_url = cleanName(r.image_url || "") || null;
-
-        if (!user_id || !character_name || !character_name_key) continue;
-        if (!(month >= 1 && month <= 12)) continue;
-        if (!(day >= 1 && day <= 31)) continue;
-
-        rowsToImport.push({ user_id, character_name, character_name_key, month, day, image_url });
-      }
-    } else if (Array.isArray(payload)) {
-      for (const r of payload) {
-        if (!isRowFormat(r)) continue;
-        const user_id = String(r.user_id);
-        const character_name = cleanName(r.character_name);
-        const character_name_key = cleanName(r.character_name_key || toCharKey(character_name));
-        const month = Number(r.month);
-        const day = Number(r.day);
-        const image_url = cleanName(r.image_url || "") || null;
-
-        if (!user_id || !character_name || !character_name_key) continue;
-        if (!(month >= 1 && month <= 12)) continue;
-        if (!(day >= 1 && day <= 31)) continue;
-
-        rowsToImport.push({ user_id, character_name, character_name_key, month, day, image_url });
-      }
-    } else if (isLegacyFormat(payload)) {
-      for (const [uid, list] of Object.entries(payload)) {
-        if (!Array.isArray(list)) continue;
-        for (const entry of list) {
-          const parsed = parseLegacyEntry(entry);
-          if (!parsed) continue;
-          rowsToImport.push({ user_id: String(uid), ...parsed });
-        }
-      }
-    } else {
-      return res.status(400).send("Unrecognized JSON format.");
-    }
-
-    if (!rowsToImport.length) {
-      return res.status(400).send("No valid rows found in JSON.");
-    }
-
-    const client = await pool.connect();
-    let imported = 0;
-
-    try {
-      await client.query("BEGIN");
-
-      await client.query(`
-        CREATE UNIQUE INDEX IF NOT EXISTS birthdays_user_char_key_unique
-        ON ${TBL} (user_id, character_name_key);
-      `);
-
-      for (const r of rowsToImport) {
-        await client.query(
-          `
-          INSERT INTO ${TBL} (user_id, character_name, character_name_key, month, day, image_url, updated_at)
-          VALUES ($1,$2,$3,$4,$5,$6, now())
-          ON CONFLICT (user_id, character_name_key)
-          DO UPDATE SET
-            character_name = EXCLUDED.character_name,
-            month = EXCLUDED.month,
-            day = EXCLUDED.day,
-            image_url = EXCLUDED.image_url,
-            updated_at = now()
-          `,
-          [r.user_id, r.character_name, r.character_name_key, r.month, r.day, r.image_url]
-        );
-
-        imported += 1;
-      }
-
-      await client.query("COMMIT");
-    } catch (e) {
-      await client.query("ROLLBACK");
-      throw e;
-    } finally {
-      client.release();
-    }
-
-    res.setHeader("content-type", "text/html; charset=utf-8");
-    res.send(`
-      <!doctype html>
-      <html><body style="font-family: system-ui; padding:24px;">
-        <p><a href="/">← Home</a> • <a href="/admin/birthdays">Admin Birthdays</a></p>
-        ${adminToolsLinks()}
-        <h2>Import complete</h2>
-        <p>Imported/updated rows: <b>${imported}</b></p>
-      </body></html>
-    `);
-  } catch (e) {
-    console.error("[IMPORT] error:", e);
-    res.status(500).send(`Import failed: ${escapeHtml(e.message || String(e))}`);
-  }
-});
-
-// ---------------- Start ----------------
-app.listen(PORT, () => {
-  console.log(`[WEB] listening on :${PORT}`);
-  console.log(`[WEB] birthdays table: ${BIRTHDAYS_TABLE} (quoted as ${TBL})`);
-  console.log(
-    `[WEB] admin role ids: ${ADMIN_ROLE_IDS.length ? ADMIN_ROLE_IDS.join(",") : "(none set)"}`
-  );
-});
+                      <button class="btn danger" type="submit" onclick="return confirm
