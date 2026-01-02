@@ -8,6 +8,9 @@
  *   - /me/birthdays : user view/add/edit/delete (only their own rows)
  *   - /admin/birthdays : admin view + admin add for ANY Discord user ID (Option B) + admin delete
  *   - /admin/search : admin search by user_id or character_name
+ * - Admin Tools links added everywhere admin lands:
+ *   - Export JSON: /admin/export.json
+ *   - Import UI:  /admin/import
  *
  * IMPORTANT (your schema):
  * - Your "birthdays" table must have a NOT NULL "character_name_key".
@@ -149,6 +152,20 @@ function tableIdent(name) {
 }
 
 const TBL = tableIdent(BIRTHDAYS_TABLE);
+
+function adminToolsLinks() {
+  return `
+    <div style="margin: 12px 0; padding: 12px; border: 1px solid #ddd; border-radius: 10px;">
+      <b>Admin Tools</b>
+      <div style="margin-top: 8px; display:flex; gap:12px; flex-wrap: wrap;">
+        <a href="/admin/birthdays">All Birthdays</a>
+        <a href="/admin/search">Search</a>
+        <a href="/admin/export.json">Export JSON</a>
+        <a href="/admin/import">Import JSON</a>
+      </div>
+    </div>
+  `;
+}
 
 // ---------------- Schema ensure ----------------
 async function ensureSchema() {
@@ -300,11 +317,14 @@ app.get("/", (req, res) => {
                 ? `
               <li><a href="/admin/birthdays">Admin: all birthdays</a></li>
               <li><a href="/admin/search">Admin: search</a></li>
+              <li><a href="/admin/export.json">Admin: export JSON</a></li>
+              <li><a href="/admin/import">Admin: import JSON</a></li>
             `
                 : ""
             }
             <li><a href="/logout">Logout</a></li>
           </ul>
+          ${user.is_admin ? adminToolsLinks() : ""}
         `
             : `
           <p>You are not logged in.</p>
@@ -317,6 +337,20 @@ app.get("/", (req, res) => {
       </body>
     </html>
   `);
+});
+
+app.get("/health", async (req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({
+      ok: true,
+      table: BIRTHDAYS_TABLE,
+      authed: Boolean(req.session.user),
+      is_admin: Boolean(req.session.user?.is_admin),
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
 });
 
 // OAuth start
@@ -504,7 +538,6 @@ app.post("/me/birthdays/:id/edit", mustBeAuthed, async (req, res) => {
     const [m, d] = parseMmdd(mmdd);
     const character_name_key = charKey(character_name);
 
-    // Only update if this row belongs to the current user
     await pool.query(
       `
       UPDATE ${TBL}
@@ -549,50 +582,67 @@ app.get("/admin/birthdays", mustBeAdmin, async (req, res) => {
   );
 
   res.setHeader("content-type", "text/html; charset=utf-8");
-res.send(`
-  <!doctype html>
-  <html>
-    <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Admin Birthdays</title></head>
-    <body style="font-family: system-ui; padding: 24px;">
-      <p><a href="/">← Home</a></p>
+  res.send(`
+    <!doctype html>
+    <html>
+      <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Admin Birthdays</title></head>
+      <body style="font-family: system-ui; padding: 24px;">
+        <p>
+          <a href="/">← Home</a> &nbsp; | &nbsp;
+          <a href="/admin/search">Admin Search</a> &nbsp; | &nbsp;
+          <a href="/admin/export.json">Export JSON</a> &nbsp; | &nbsp;
+          <a href="/admin/import">Import JSON</a>
+        </p>
 
-      <h2>Admin: All Birthdays</h2>
+        ${adminToolsLinks()}
 
-      <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin: 10px 0 16px;">
-        <a href="/admin/export.json" style="padding:8px 12px; border:1px solid #ccc; border-radius:8px; text-decoration:none;">
-          ⬇️ Download JSON backup
-        </a>
-        <a href="/admin/import" style="padding:8px 12px; border:1px solid #ccc; border-radius:8px; text-decoration:none;">
-          ⬆️ Import JSON backup
-        </a>
-      </div>
+        <h2>Admin: All Birthdays</h2>
 
-      <p>Total: ${rows.length}</p>
+        <h3>Admin Add (Option B — raw Discord user ID)</h3>
+        <form method="POST" action="/admin/birthdays/add">
+          <div><label>Discord User ID<br/><input name="user_id" required style="width: 360px"/></label></div>
+          <div><label>Character Name<br/><input name="character_name" required style="width: 360px"/></label></div>
+          <div><label>Date (MM-DD)<br/><input name="mmdd" placeholder="07-12" required style="width: 120px"/></label></div>
+          <div><label>Image URL<br/><input name="image_url" style="width: 560px"/></label></div>
+          <button type="submit">Add for user</button>
+        </form>
 
-      ${rows.length ? `
-        <table border="1" cellpadding="8" cellspacing="0">
-          <thead><tr><th>User ID</th><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
-          <tbody>
-            ${rows.map(r => `
-              <tr>
-                <td>${escapeHtml(r.user_id)}</td>
-                <td>${escapeHtml(r.character_name)}</td>
-                <td>${String(r.month).padStart(2,"0")}-${String(r.day).padStart(2,"0")}</td>
-                <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank">link</a>` : ""}</td>
-                <td>
-                  <form method="POST" action="/admin/birthdays/${r.id}/delete" style="display:inline;">
-                    <button type="submit" onclick="return confirm('Admin delete this birthday?')">Delete</button>
-                  </form>
-                </td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      ` : `<p>No rows.</p>`}
-    </body>
-  </html>
-`);
+        <hr/>
 
+        <p>Total rows: <b>${rows.length}</b></p>
+
+        ${
+          rows.length
+            ? `
+          <table border="1" cellpadding="8" cellspacing="0">
+            <thead><tr><th>User ID</th><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
+            <tbody>
+              ${rows
+                .map(
+                  (r) => `
+                <tr>
+                  <td>${escapeHtml(r.user_id)}</td>
+                  <td>${escapeHtml(r.character_name)}</td>
+                  <td>${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}</td>
+                  <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank">link</a>` : ""}</td>
+                  <td>
+                    <form method="POST" action="/admin/birthdays/${r.id}/delete" style="display:inline;">
+                      <button type="submit" onclick="return confirm('Admin delete this birthday?')">Delete</button>
+                    </form>
+                  </td>
+                </tr>
+              `
+                )
+                .join("")}
+            </tbody>
+          </table>
+        `
+            : `<p>No rows.</p>`
+        }
+      </body>
+    </html>
+  `);
+});
 
 app.post("/admin/birthdays/add", mustBeAdmin, async (req, res) => {
   try {
@@ -652,7 +702,6 @@ app.get("/admin/search", mustBeAdmin, async (req, res) => {
 
   if (q) {
     if (/^\d{15,25}$/.test(q)) {
-      // search by user id
       const r = await pool.query(
         `SELECT id, user_id, character_name, month, day, image_url
          FROM ${TBL}
@@ -662,7 +711,6 @@ app.get("/admin/search", mustBeAdmin, async (req, res) => {
       );
       rows = r.rows;
     } else {
-      // search by character name substring (case-insensitive)
       const r = await pool.query(
         `SELECT id, user_id, character_name, month, day, image_url
          FROM ${TBL}
@@ -681,7 +729,15 @@ app.get("/admin/search", mustBeAdmin, async (req, res) => {
     <html>
       <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Admin Search</title></head>
       <body style="font-family: system-ui; padding: 24px;">
-        <p><a href="/">← Home</a> &nbsp; | &nbsp; <a href="/admin/birthdays">Admin Birthdays</a></p>
+        <p>
+          <a href="/">← Home</a> &nbsp; | &nbsp;
+          <a href="/admin/birthdays">Admin Birthdays</a> &nbsp; | &nbsp;
+          <a href="/admin/export.json">Export JSON</a> &nbsp; | &nbsp;
+          <a href="/admin/import">Import JSON</a>
+        </p>
+
+        ${adminToolsLinks()}
+
         <h2>Admin Search</h2>
 
         <form method="GET" action="/admin/search">
@@ -741,17 +797,14 @@ function toCharKey(name) {
 }
 
 function isRowFormat(obj) {
-  // list-of-rows format
   return obj && typeof obj === "object" && "user_id" in obj && "character_name" in obj;
 }
 
 function isLegacyFormat(obj) {
-  // legacy: { "123": [ ["Name","MM-DD","url"], ...] }
   return obj && typeof obj === "object" && !Array.isArray(obj);
 }
 
 function parseLegacyEntry(entry) {
-  // entry: [name, "MM-DD", url]
   if (!Array.isArray(entry) || entry.length < 2) return null;
   const character_name = cleanName(entry[0]);
   const mmdd = String(entry[1] || "");
@@ -778,7 +831,6 @@ app.get("/admin/export.json", mustBeAdmin, async (req, res) => {
      ORDER BY user_id ASC, month ASC, day ASC, character_name_key ASC`
   );
 
-  // Give them a file download
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   res.setHeader("content-type", "application/json; charset=utf-8");
   res.setHeader("content-disposition", `attachment; filename="mnemosyne-backup-${stamp}.json"`);
@@ -809,7 +861,15 @@ app.get("/admin/import", mustBeAdmin, async (req, res) => {
         <title>Admin Import</title>
       </head>
       <body style="font-family: system-ui; padding: 24px;">
-        <p><a href="/">← Home</a> • <a href="/admin/birthdays">Admin Birthdays</a></p>
+        <p>
+          <a href="/">← Home</a> &nbsp; | &nbsp;
+          <a href="/admin/birthdays">Admin Birthdays</a> &nbsp; | &nbsp;
+          <a href="/admin/search">Admin Search</a> &nbsp; | &nbsp;
+          <a href="/admin/export.json">Export JSON</a>
+        </p>
+
+        ${adminToolsLinks()}
+
         <h2>Admin: Import JSON Backup</h2>
 
         <p><b>WARNING:</b> This will <b>upsert</b> rows into the database (insert new + update existing).
@@ -870,11 +930,8 @@ app.post("/admin/import", mustBeAdmin, async (req, res) => {
       return res.status(400).send("Invalid JSON.");
     }
 
-    // Normalize to an array of row objects:
-    // { user_id, character_name, character_name_key, month, day, image_url }
     let rowsToImport = [];
 
-    // If it's our export wrapper { rows: [...] }
     if (payload && typeof payload === "object" && Array.isArray(payload.rows)) {
       for (const r of payload.rows) {
         if (!isRowFormat(r)) continue;
@@ -891,9 +948,7 @@ app.post("/admin/import", mustBeAdmin, async (req, res) => {
 
         rowsToImport.push({ user_id, character_name, character_name_key, month, day, image_url });
       }
-    }
-    // If it's list-of-rows directly
-    else if (Array.isArray(payload)) {
+    } else if (Array.isArray(payload)) {
       for (const r of payload) {
         if (!isRowFormat(r)) continue;
         const user_id = String(r.user_id);
@@ -909,9 +964,7 @@ app.post("/admin/import", mustBeAdmin, async (req, res) => {
 
         rowsToImport.push({ user_id, character_name, character_name_key, month, day, image_url });
       }
-    }
-    // Legacy dict format
-    else if (isLegacyFormat(payload)) {
+    } else if (isLegacyFormat(payload)) {
       for (const [uid, list] of Object.entries(payload)) {
         if (!Array.isArray(list)) continue;
         for (const entry of list) {
@@ -928,14 +981,12 @@ app.post("/admin/import", mustBeAdmin, async (req, res) => {
       return res.status(400).send("No valid rows found in JSON.");
     }
 
-    // Import using a transaction + batch upserts
     const client = await pool.connect();
     let imported = 0;
 
     try {
       await client.query("BEGIN");
 
-      // Make sure unique index exists (required for ON CONFLICT to work)
       await client.query(`
         CREATE UNIQUE INDEX IF NOT EXISTS birthdays_user_char_key_unique
         ON ${TBL} (user_id, character_name_key);
@@ -973,6 +1024,7 @@ app.post("/admin/import", mustBeAdmin, async (req, res) => {
       <!doctype html>
       <html><body style="font-family: system-ui; padding:24px;">
         <p><a href="/">← Home</a> • <a href="/admin/birthdays">Admin Birthdays</a></p>
+        ${adminToolsLinks()}
         <h2>Import complete</h2>
         <p>Imported/updated rows: <b>${imported}</b></p>
       </body></html>
@@ -983,10 +1035,11 @@ app.post("/admin/import", mustBeAdmin, async (req, res) => {
   }
 });
 
-
 // ---------------- Start ----------------
 app.listen(PORT, () => {
   console.log(`[WEB] listening on :${PORT}`);
   console.log(`[WEB] birthdays table: ${BIRTHDAYS_TABLE} (quoted as ${TBL})`);
-  console.log(`[WEB] admin role ids: ${ADMIN_ROLE_IDS.length ? ADMIN_ROLE_IDS.join(",") : "(none set)"}`);
+  console.log(
+    `[WEB] admin role ids: ${ADMIN_ROLE_IDS.length ? ADMIN_ROLE_IDS.join(",") : "(none set)"}`
+  );
 });
