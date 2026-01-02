@@ -517,22 +517,9 @@ app.get("/", (req, res) => {
     `;
 
   res.setHeader("content-type", "text/html; charset=utf-8");
-  res.send(renderPage({ title: "Mnemosyne Admin", user, bodyHtml }));
+  res.send(renderPage({ title: "Mnemosyne Portal", user, bodyHtml }));
 });
 
-app.get("/health", async (req, res) => {
-  try {
-    await pool.query("SELECT 1");
-    res.json({
-      ok: true,
-      table: BIRTHDAYS_TABLE,
-      authed: Boolean(req.session.user),
-      is_admin: Boolean(req.session.user?.is_admin),
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
-  }
-});
 
 // OAuth start
 app.get("/login", (req, res) => {
