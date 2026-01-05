@@ -343,10 +343,17 @@ function adminToolsCard(user) {
         <a href="/admin/search">Search</a>
         <a href="/admin/export.json">Export JSON</a>
         <a href="/admin/import">Import JSON</a>
+
+        <a href="https://www.dropbox.com/home/Grass%20Is%20Greener%20Backup"
+           target="_blank"
+           rel="noreferrer noopener">
+          Dropbox Backup Folder
+        </a>
       </div>
     </div>
   `;
 }
+
 
 function renderPage({ title, user, bodyHtml }) {
   return `
