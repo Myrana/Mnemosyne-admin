@@ -445,6 +445,28 @@ async function ensureSchema() {
   `);
 }
 
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS discord_users (
+    user_id text PRIMARY KEY,
+    username text NOT NULL,
+    global_name text,
+    discriminator text,
+    avatar text,
+    last_seen_at timestamptz NOT NULL DEFAULT now()
+  );
+`);
+
+await pool.query(`
+  CREATE INDEX IF NOT EXISTS discord_users_username_idx
+  ON discord_users (lower(username));
+`);
+
+await pool.query(`
+  CREATE INDEX IF NOT EXISTS discord_users_global_name_idx
+  ON discord_users (lower(global_name));
+`);
+
+
 ensureSchema().catch((e) => {
   console.error("[BOOT] schema ensure failed:", e);
   process.exit(1);
@@ -559,6 +581,29 @@ app.get("/callback", async (req, res) => {
 
     const token = await discordTokenExchange(code);
     const user = await discordGetUser(token.access_token);
+
+    await pool.query(
+  `
+  INSERT INTO discord_users (user_id, username, global_name, discriminator, avatar, last_seen_at)
+  VALUES ($1, $2, $3, $4, $5, now())
+  ON CONFLICT (user_id)
+  DO UPDATE SET
+    username = EXCLUDED.username,
+    global_name = EXCLUDED.global_name,
+    discriminator = EXCLUDED.discriminator,
+    avatar = EXCLUDED.avatar,
+    last_seen_at = now()
+  `,
+  [
+    String(user.id),
+    String(user.username || ""),
+    user.global_name ? String(user.global_name) : null,
+    user.discriminator ? String(user.discriminator) : null,
+    user.avatar ? String(user.avatar) : null,
+  ]
+);
+
+    
     const roles = await discordGetMemberRoles(user.id);
 
     req.session.user = {
@@ -914,27 +959,50 @@ app.get("/admin/search", mustBeAdmin, async (req, res) => {
   const q = String(req.query.q || "").trim();
   let rows = [];
 
-  if (q) {
-    if (/^\d{15,25}$/.test(q)) {
-      const r = await pool.query(
-        `SELECT id, user_id, character_name, month, day, image_url
-         FROM ${TBL}
-         WHERE user_id=$1
-         ORDER BY month ASC, day ASC, character_name_key ASC`,
-        [q]
-      );
-      rows = r.rows;
-    } else {
-      const r = await pool.query(
-        `SELECT id, user_id, character_name, month, day, image_url
-         FROM ${TBL}
-         WHERE character_name ILIKE $1
-         ORDER BY month ASC, day ASC, character_name_key ASC
-         LIMIT 200`,
-        [`%${q}%`]
-      );
-      rows = r.rows;
+  try {
+    if (q) {
+      if (/^\d{15,25}$/.test(q)) {
+        // Search by Discord user id
+        const r = await pool.query(
+          `
+          SELECT
+            b.id, b.user_id, b.character_name, b.month, b.day, b.image_url,
+            u.username AS discord_username,
+            u.global_name AS discord_global_name
+          FROM ${TBL} b
+          LEFT JOIN discord_users u ON u.user_id = b.user_id
+          WHERE b.user_id = $1
+          ORDER BY b.month ASC, b.day ASC, b.character_name_key ASC
+          `,
+          [q]
+        );
+        rows = r.rows;
+      } else {
+        // Search by character name OR Discord username/global_name
+        const like = `%${q}%`;
+        const r = await pool.query(
+          `
+          SELECT
+            b.id, b.user_id, b.character_name, b.month, b.day, b.image_url,
+            u.username AS discord_username,
+            u.global_name AS discord_global_name
+          FROM ${TBL} b
+          LEFT JOIN discord_users u ON u.user_id = b.user_id
+          WHERE b.character_name ILIKE $1
+             OR u.username ILIKE $1
+             OR u.global_name ILIKE $1
+          ORDER BY b.month ASC, b.day ASC, b.character_name_key ASC
+          LIMIT 200
+          `,
+          [like]
+        );
+        rows = r.rows;
+      }
     }
+  } catch (e) {
+    console.error("[ADMIN SEARCH] error:", e);
+    // keep rows empty, but show error in UI
+    rows = [];
   }
 
   const bodyHtml = `
@@ -947,9 +1015,12 @@ app.get("/admin/search", mustBeAdmin, async (req, res) => {
       <b>Search</b>
       <form method="GET" action="/admin/search" style="margin-top:10px;">
         <div>
-          <label>Discord user id OR character name</label><br/>
+          <label>Discord user id OR character name OR Discord username</label><br/>
           <input name="q" value="${escapeHtml(q)}" style="width: min(520px, 95vw)"/>
           <button class="btn" type="submit" style="margin-left:8px;">Search</button>
+        </div>
+        <div class="muted small" style="margin-top:8px;">
+          Tip: username results only appear for people who have logged into the site at least once (so they exist in <code>discord_users</code>).
         </div>
       </form>
     </div>
@@ -958,10 +1029,8 @@ app.get("/admin/search", mustBeAdmin, async (req, res) => {
       <b>Results</b>
       ${
         q
-          ? `<div class="muted small" style="margin-top:6px;">Results for <b>${escapeHtml(
-              q
-            )}</b>: ${rows.length}</div>`
-          : `<div class="muted small" style="margin-top:6px;">Enter a user id (numbers) or a character name.</div>`
+          ? `<div class="muted small" style="margin-top:6px;">Results for <b>${escapeHtml(q)}</b>: ${rows.length}</div>`
+          : `<div class="muted small" style="margin-top:6px;">Enter a user id (numbers), character name, or Discord username.</div>`
       }
 
       <div style="margin-top:10px; overflow:auto;">
@@ -969,24 +1038,40 @@ app.get("/admin/search", mustBeAdmin, async (req, res) => {
           rows.length
             ? `
           <table>
-            <thead><tr><th>User ID</th><th>Name</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
+            <thead>
+              <tr>
+                <th>User</th>
+                <th>Character</th>
+                <th>Date</th>
+                <th>Image</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
             <tbody>
               ${rows
-                .map(
-                  (r) => `
-                <tr>
-                  <td class="mono">${escapeHtml(r.user_id)}</td>
-                  <td>${escapeHtml(r.character_name)}</td>
-                  <td class="mono">${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}</td>
-                  <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank" rel="noreferrer">link</a>` : ""}</td>
-                  <td>
-                    <form method="POST" action="/admin/birthdays/${r.id}/delete" style="display:inline;">
-                      <button class="btn danger" type="submit" onclick="return confirm('Admin delete this birthday?')">Delete</button>
-                    </form>
-                  </td>
-                </tr>
-              `
-                )
+                .map((r) => {
+                  const displayName =
+                    (r.discord_global_name && r.discord_global_name.trim()) ||
+                    (r.discord_username && r.discord_username.trim()) ||
+                    "";
+                  const userCell = displayName
+                    ? `<div><b>${escapeHtml(displayName)}</b></div><div class="mono muted small">${escapeHtml(r.user_id)}</div>`
+                    : `<div class="mono">${escapeHtml(r.user_id)}</div>`;
+
+                  return `
+                    <tr>
+                      <td>${userCell}</td>
+                      <td>${escapeHtml(r.character_name)}</td>
+                      <td class="mono">${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}</td>
+                      <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank" rel="noreferrer">link</a>` : ""}</td>
+                      <td>
+                        <form method="POST" action="/admin/birthdays/${r.id}/delete" style="display:inline;">
+                          <button class="btn danger" type="submit" onclick="return confirm('Admin delete this birthday?')">Delete</button>
+                        </form>
+                      </td>
+                    </tr>
+                  `;
+                })
                 .join("")}
             </tbody>
           </table>
@@ -1002,6 +1087,7 @@ app.get("/admin/search", mustBeAdmin, async (req, res) => {
   res.setHeader("content-type", "text/html; charset=utf-8");
   res.send(renderPage({ title: "Admin: Search", user, bodyHtml }));
 });
+
 
 // ---------- Backup/Restore helpers ----------
 function toCharKey(name) {
