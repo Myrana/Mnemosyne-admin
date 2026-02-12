@@ -904,9 +904,20 @@ app.get("/admin/users", mustBeAdmin, async (req, res) => {
                       </td>
                       <td class="mono">${escapeHtml(r.user_id)}</td>
                       <td class="mono">${Number(r.birthday_count || 0)}</td>
-                      <td>
-                        <a class="btn primary" href="/admin/users/${encodeURIComponent(r.user_id)}">Manage</a>
-                      </td>
+                     <td>
+                      <a class="btn" href="/admin/users/${encodeURIComponent(u.user_id)}">Manage</a>
+
+                      <form method="POST"
+                            action="/admin/users/${encodeURIComponent(u.user_id)}/delete"
+                            style="display:inline; margin-left:8px;">
+                        <input type="hidden" name="delete_mapping" value="yes" />
+                        <button class="btn danger" type="submit"
+                          onclick="return confirm('Delete this user? This will delete ALL birthdays for them.');">
+                          Delete
+                      </button>
+                    </form>
+                  </td>
+
                     </tr>
                   `;
                 })
