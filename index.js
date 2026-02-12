@@ -344,7 +344,7 @@ function renderPage({ title, user, bodyHtml }) {
   const header = `
     <div class="topbar">
       <div class="brand">
-        <div class="logo">M</div>
+        <div class="logo"><img src = "https://b.l3n.co/UivoNb.jpeg"/></div>
         <div>
           <div class="brand-title">Mnemosyne Admin</div>
           <div class="brand-sub">Birthdays dashboard</div>
