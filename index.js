@@ -283,7 +283,7 @@ async function discordGetMemberRoles(userId) {
 async function upsertDiscordUser({ user_id, username, avatar }) {
   await pool.query(
     `
-    INSERT INTO discord_users (user_id, username, avatar, updated_at)
+    INSERT INTO discord_users (user_id, username, avatar, last_seen_at)
     VALUES ($1, $2, $3, now())
     ON CONFLICT (user_id)
     DO UPDATE SET
@@ -294,6 +294,7 @@ async function upsertDiscordUser({ user_id, username, avatar }) {
     [String(user_id), String(username), avatar ? String(avatar) : null]
   );
 }
+
 
 // ---------------- UI rendering helpers ----------------
 const DROPBOX_ADMIN_URL = "https://www.dropbox.com/home/Grass%20Is%20Greener%20Backup";
