@@ -327,7 +327,6 @@ function renderPage({ title, user, bodyHtml }) {
     <div class="card">
       <div class="card-title">Admin Tools</div>
       <div class="grid">
-        <a class="btn" href="/admin/birthdays">All Birthdays</a>
         <a class="btn" href="/admin/users">User Directory</a>
         <a class="btn" href="/admin/search">Search</a>
         <a class="btn" href="/admin/export.json" target="_blank" rel="noreferrer">Export JSON</a>
@@ -587,20 +586,6 @@ app.get("/", (req, res) => {
   res.send(renderPage({ title: "Home", user, bodyHtml }));
 });
 
-app.get("/health", async (req, res) => {
-  try {
-    await pool.query("SELECT 1");
-    res.json({
-      ok: true,
-      table: BIRTHDAYS_TABLE,
-      authed: Boolean(req.session.user),
-      is_admin: Boolean(req.session.user?.is_admin),
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
-  }
-});
-
 // OAuth start
 app.get("/login", (req, res) => {
   const state = randomState();
@@ -855,139 +840,6 @@ app.post("/me/birthdays/:id/delete", mustBeAuthed, async (req, res) => {
   } catch (e) {
     console.error("[DEL ME] error:", e);
     res.status(500).send(`Delete failed: ${escapeHtml(e.message)}`);
-  }
-});
-
-// ---------------- Admin: All birthdays (Option B add) ----------------
-app.get("/admin/birthdays", mustBeAdmin, async (req, res) => {
-  const user = req.session.user;
-
-  const { rows } = await pool.query(
-    `SELECT b.id, b.user_id, u.username, b.character_name, b.month, b.day, b.image_url
-     FROM ${TBL} b
-     LEFT JOIN discord_users u ON u.user_id = b.user_id
-     ORDER BY b.month ASC, b.day ASC, b.character_name_key ASC`
-  );
-
-  const bodyHtml = `
-    <div class="card">
-      <div class="card-title">Admin: All Birthdays</div>
-      <div class="muted small">Add for any user by Discord user ID. (Option B)</div>
-      <div class="spacer"></div>
-
-      <form method="POST" action="/admin/birthdays/add">
-        <div class="row">
-          <div class="col">
-            <label>Discord User ID</label>
-            <input name="user_id" required placeholder="123456789012345678"/>
-          </div>
-          <div class="col">
-            <label>Character Name</label>
-            <input name="character_name" required placeholder="Cash Langston"/>
-          </div>
-          <div style="width:140px">
-            <label>Date (MM-DD)</label>
-            <input name="mmdd" required placeholder="07-12"/>
-          </div>
-          <div class="col">
-            <label>Image URL (optional)</label>
-            <input name="image_url" placeholder="https://...png"/>
-          </div>
-        </div>
-        <div class="spacer"></div>
-        <button class="btn ok" type="submit">Add / Update for user</button>
-      </form>
-    </div>
-
-    <div class="card">
-      <div class="card-title">Rows</div>
-      <div class="muted small">Total: ${rows.length}</div>
-      <div class="spacer"></div>
-
-      ${
-        rows.length
-          ? `
-        <div style="overflow:auto;">
-          <table>
-            <thead><tr><th>User</th><th>User ID</th><th>Character</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
-            <tbody>
-              ${rows
-                .map(
-                  (r) => `
-                <tr>
-                  <td>${r.username ? escapeHtml(r.username) : `<span class="muted">unknown</span>`}</td>
-                  <td class="mono">${escapeHtml(r.user_id)}</td>
-                  <td>${escapeHtml(r.character_name)}</td>
-                  <td class="mono">${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}</td>
-                  <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank" rel="noreferrer">link</a>` : `<span class="muted small">—</span>`}</td>
-                  <td>
-                    <form method="POST" action="/admin/birthdays/${r.id}/delete" style="display:inline;">
-                      <button class="btn danger" type="submit" onclick="return confirm('Admin delete this birthday?')">Delete</button>
-                    </form>
-                  </td>
-                </tr>
-              `
-                )
-                .join("")}
-            </tbody>
-          </table>
-        </div>
-      `
-          : `<div class="muted">No rows.</div>`
-      }
-    </div>
-  `;
-
-  res.setHeader("content-type", "text/html; charset=utf-8");
-  res.send(renderPage({ title: "Admin: All Birthdays", user, bodyHtml }));
-});
-
-app.post("/admin/birthdays/add", mustBeAdmin, async (req, res) => {
-  try {
-    const targetUserId = safeIntStringDiscordId(req.body.user_id);
-    const character_name = cleanName(req.body.character_name);
-    const mmdd = String(req.body.mmdd || "");
-    const image_url = cleanName(req.body.image_url || "");
-
-    if (!targetUserId) return res.status(400).send("user_id should be a Discord numeric ID");
-    if (!character_name) return res.status(400).send("Missing character_name");
-    if (!mmddValid(mmdd)) return res.status(400).send("Invalid mmdd (use MM-DD)");
-
-    const [m, d] = parseMmdd(mmdd);
-    const character_name_key = charKey(character_name);
-
-    await pool.query(
-      `
-      INSERT INTO ${TBL} (user_id, character_name, character_name_key, month, day, image_url, updated_at)
-      VALUES ($1, $2, $3, $4, $5, NULLIF($6,''), now())
-      ON CONFLICT (user_id, character_name_key)
-      DO UPDATE SET
-        character_name = EXCLUDED.character_name,
-        month = EXCLUDED.month,
-        day = EXCLUDED.day,
-        image_url = EXCLUDED.image_url,
-        updated_at = now()
-      `,
-      [targetUserId, character_name, character_name_key, m, d, image_url]
-    );
-
-    res.redirect("/admin/birthdays");
-  } catch (e) {
-    console.error("[ADMIN ADD] error:", e);
-    res.status(500).send(`Admin add failed: ${escapeHtml(e.message)}`);
-  }
-});
-
-app.post("/admin/birthdays/:id/delete", mustBeAdmin, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!id) return res.status(400).send("Bad id");
-
-    await pool.query(`DELETE FROM ${TBL} WHERE id=$1`, [id]);
-    res.redirect("/admin/birthdays");
-  } catch (e) {
-    console.error("[ADMIN DEL] error:", e);
-    res.status(500).send(`Admin delete failed: ${escapeHtml(e.message)}`);
   }
 });
 
