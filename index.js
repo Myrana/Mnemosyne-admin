@@ -409,7 +409,7 @@ function renderPage({ title, user, bodyHtml }) {
     position:sticky; top:0; backdrop-filter: blur(8px);
   }
   .brand{display:flex; gap:12px; align-items:center;}
-  .logo{
+  .logo img{
     width:38px; height:38px; border-radius:12px;
     display:flex; align-items:center; justify-content:center;
     background: radial-gradient(circle at 30% 30%, var(--accent), rgba(34,197,94,.55));
