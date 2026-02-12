@@ -172,8 +172,7 @@ async function ensureSchema() {
     CREATE TABLE IF NOT EXISTS discord_users (
       user_id text PRIMARY KEY,
       username text NOT NULL,
-      avatar text,
-      last_seen_at timestamptz NOT NULL DEFAULT now()
+      avatar text
     );
   `);
 
