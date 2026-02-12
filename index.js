@@ -1078,6 +1078,69 @@ app.post("/admin/users/:id/add", mustBeAdmin, async (req, res) => {
   }
 });
 
+app.post("/admin/users/:id/delete", mustBeAdmin, async (req, res) => {
+  try {
+    const targetUserId = safeIntStringDiscordId(req.params.id);
+    if (!targetUserId) return res.status(400).send("Bad user id");
+
+    const alsoDeleteMapping = req.body.delete_mapping === "yes";
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // 1) Delete all birthdays for that user
+      const delBirthdays = await client.query(
+        `DELETE FROM ${TBL} WHERE user_id=$1`,
+        [targetUserId]
+      );
+
+      // 2) Optionally delete the username mapping
+      let delMappingCount = 0;
+      if (alsoDeleteMapping) {
+        const delMapping = await client.query(
+          `DELETE FROM discord_users WHERE user_id=$1`,
+          [targetUserId]
+        );
+        delMappingCount = delMapping.rowCount || 0;
+      }
+
+      await client.query("COMMIT");
+
+      res.setHeader("content-type", "text/html; charset=utf-8");
+      res.send(
+        renderPage({
+          title: "User deleted",
+          user: req.session.user,
+          bodyHtml: `
+            <div class="card">
+              <div class="card-title">User deletion complete</div>
+              <div class="muted small mono">User ID: ${escapeHtml(targetUserId)}</div>
+              <div class="spacer"></div>
+              <div>Deleted birthdays: <b>${delBirthdays.rowCount || 0}</b></div>
+              <div>Deleted username mapping: <b>${delMappingCount}</b></div>
+              <div class="spacer"></div>
+              <div class="grid">
+                <a class="btn primary" href="/admin/users">Back to user directory</a>
+                <a class="btn" href="/admin/birthdays">Admin birthdays</a>
+              </div>
+            </div>
+          `,
+        })
+      );
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch (e) {
+    console.error("[ADMIN USER DELETE] error:", e);
+    res.status(500).send(`Delete user failed: ${escapeHtml(e.message)}`);
+  }
+});
+
+
 // ---------------- Admin Search (user_id OR character OR username) ----------------
 app.get("/admin/search", mustBeAdmin, async (req, res) => {
   const user = req.session.user;
