@@ -172,7 +172,8 @@ async function ensureSchema() {
     CREATE TABLE IF NOT EXISTS discord_users (
       user_id text PRIMARY KEY,
       username text NOT NULL,
-      avatar text
+      avatar text,
+      last_seen_at timestamptz NOT NULL DEFAULT now()
     );
   `);
 
@@ -288,7 +289,7 @@ async function upsertDiscordUser({ user_id, username, avatar }) {
     DO UPDATE SET
       username = EXCLUDED.username,
       avatar = EXCLUDED.avatar,
-      updated_at = now()
+      last_seen_at = now()
     `,
     [String(user_id), String(username), avatar ? String(avatar) : null]
   );
