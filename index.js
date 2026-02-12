@@ -173,7 +173,7 @@ async function ensureSchema() {
       user_id text PRIMARY KEY,
       username text NOT NULL,
       avatar text,
-      updated_at timestamptz NOT NULL DEFAULT now()
+      last_seen_at timestamptz NOT NULL DEFAULT now()
     );
   `);
 
