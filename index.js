@@ -354,10 +354,13 @@ function renderPage({ title, user, bodyHtml }) {
       <div class="topbar-right">
         <button class="btn ghost" id="themeToggle" type="button" title="Toggle theme">🌓</button>
         ${
-          user
-            ? `<span class="pill">👤 ${escapeHtml(user.username)}${isAdmin ? " • admin" : ""}</span>
-               <a class="btn danger" href="/logout">Logout</a>`
+         user
+            ? `<a class="pill pill-link" href="/me/birthdays" title="Go to my birthdays">
+            👤 ${escapeHtml(user.username)}${isAdmin ? " • admin" : ""}
+             </a>
+             <a class="btn danger" href="/logout">Logout</a>`
             : `<a class="btn" href="/login">Login with Discord</a>`
+
         }
       </div>
     </div>
@@ -425,6 +428,14 @@ function renderPage({ title, user, bodyHtml }) {
     background: rgba(255,255,255,.03);
     border-radius:999px; font-size:13px;
   }
+
+  .pill-link{ cursor:pointer; }
+  .pill-link:hover{
+    text-decoration:none;
+    border-color: rgba(124,92,255,.55);
+    background: rgba(124,92,255,.10);
+}
+
 
   .card{
     background: linear-gradient(180deg, rgba(255,255,255,.04), transparent 60%), var(--panel);
@@ -568,7 +579,6 @@ app.get("/", (req, res) => {
         <div class="grid">
           <a class="btn primary" href="/me/birthdays">My Birthdays</a>
           ${user.is_admin ? `<a class="btn" href="/admin/birthdays">Admin: All Birthdays</a>` : ""}
-          <a class="btn" href="/health">Health</a>
         </div>
       `
           : `
@@ -576,7 +586,6 @@ app.get("/", (req, res) => {
         <div class="spacer"></div>
         <div class="grid">
           <a class="btn primary" href="/login">Login with Discord</a>
-          <a class="btn" href="/health">Health</a>
         </div>
       `
       }
