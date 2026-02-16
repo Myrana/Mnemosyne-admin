@@ -329,7 +329,6 @@ function renderPage({ title, user, bodyHtml }) {
       <div class="card-title">Admin Tools</div>
       <div class="grid">
         <a class="btn" href="/admin/users">User Directory</a>
-        <a class="btn" href="/admin/search">Search</a>
         <a class="btn" href="/admin/export.json" target="_blank" rel="noreferrer">Export JSON</a>
         <a class="btn" href="/admin/import">Import JSON</a>
         <a class="btn" href="${DROPBOX_ADMIN_URL}" target="_blank" rel="noreferrer">Open Dropbox Backup</a>
@@ -1150,119 +1149,6 @@ app.post("/admin/users/:id/delete", mustBeAdmin, async (req, res) => {
   }
 });
 
-
-// ---------------- Admin Search (user_id OR character OR username) ----------------
-app.get("/admin/search", mustBeAdmin, async (req, res) => {
-  const user = req.session.user;
-  const q = String(req.query.q || "").trim();
-  let rows = [];
-
-  if (q) {
-    const asId = safeIntStringDiscordId(q);
-
-    if (asId) {
-      const r = await pool.query(
-        `
-        SELECT b.id, b.user_id, u.username, b.character_name, b.month, b.day, b.image_url
-        FROM ${TBL} b
-        LEFT JOIN discord_users u ON u.user_id = b.user_id
-        WHERE b.user_id=$1
-        ORDER BY b.month ASC, b.day ASC, b.character_name_key ASC
-        `,
-        [asId]
-      );
-      rows = r.rows;
-    } else {
-      // Search:
-      // 1) username match in discord_users
-      // 2) character name substring in birthdays
-      const r = await pool.query(
-        `
-        SELECT b.id, b.user_id, u.username, b.character_name, b.month, b.day, b.image_url
-        FROM ${TBL} b
-        LEFT JOIN discord_users u ON u.user_id = b.user_id
-        WHERE
-          b.character_name ILIKE $1
-          OR u.username ILIKE $1
-        ORDER BY b.month ASC, b.day ASC, b.character_name_key ASC
-        LIMIT 300
-        `,
-        [`%${q}%`]
-      );
-      rows = r.rows;
-    }
-  }
-
-  const bodyHtml = `
-    <div class="card">
-      <div class="card-title">Admin: Search</div>
-      <form method="GET" action="/admin/search">
-        <div class="row">
-          <div class="col">
-            <label>Search by Discord User ID, Username, or Character Name</label>
-            <input name="q" value="${escapeHtml(q)}" placeholder="e.g. 123456789012345678 OR MandyWinslow OR Cash"/>
-          </div>
-          <div style="width:180px; align-self:end;">
-            <button class="btn primary" type="submit">Search</button>
-          </div>
-        </div>
-      </form>
-      <div class="spacer"></div>
-      <div class="muted small">
-        Tip: Usernames are available after someone logs in at least once.
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">Results</div>
-      ${
-        q
-          ? `<div class="muted small">Results for <b>${escapeHtml(q)}</b>: ${rows.length}</div>`
-          : `<div class="muted small">Enter a search term above.</div>`
-      }
-
-      <div class="spacer"></div>
-
-      ${
-        rows.length
-          ? `
-        <div style="overflow:auto;">
-          <table>
-            <thead><tr><th>User</th><th>User ID</th><th>Character</th><th>Date</th><th>Image</th><th>Actions</th></tr></thead>
-            <tbody>
-              ${rows
-                .map(
-                  (r) => `
-                <tr>
-                  <td>${r.username ? escapeHtml(r.username) : `<span class="muted">unknown</span>`}</td>
-                  <td class="mono">${escapeHtml(r.user_id)}</td>
-                  <td>${escapeHtml(r.character_name)}</td>
-                  <td class="mono">${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}</td>
-                  <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank" rel="noreferrer">link</a>` : `<span class="muted small">—</span>`}</td>
-                  <td>
-                    <a class="btn" href="/admin/users/${encodeURIComponent(r.user_id)}">Manage user</a>
-                    <form method="POST" action="/admin/birthdays/${r.id}/delete" style="display:inline;">
-                      <button class="btn danger" type="submit" onclick="return confirm('Admin delete this birthday?')">Delete</button>
-                    </form>
-                  </td>
-                </tr>
-              `
-                )
-                .join("")}
-            </tbody>
-          </table>
-        </div>
-      `
-          : q
-          ? `<div class="muted">No matches.</div>`
-          : ``
-      }
-    </div>
-  `;
-
-  res.setHeader("content-type", "text/html; charset=utf-8");
-  res.send(renderPage({ title: "Admin: Search", user, bodyHtml }));
-});
 
 // ---------------- Admin Export JSON ----------------
 app.get("/admin/export.json", mustBeAdmin, async (req, res) => {
