@@ -1208,6 +1208,23 @@ app.post("/admin/users/:id/delete", mustBeAdmin, async (req, res) => {
   }
 });
 
+app.post("/admin/birthdays/:id/delete", mustBeAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).send("Bad birthday id");
+
+    await pool.query(`DELETE FROM ${TBL} WHERE id=$1`, [id]);
+
+    // Send admin back to where they launched delete from.
+    const back = String(req.get("referer") || "");
+    if (back.startsWith("http://") || back.startsWith("https://")) return res.redirect(back);
+    return res.redirect("/admin/users");
+  } catch (e) {
+    console.error("[ADMIN BDAY DELETE] error:", e);
+    res.status(500).send(`Admin delete failed: ${escapeHtml(e.message)}`);
+  }
+});
+
 
 // ---------------- Admin Export JSON ----------------
 app.get("/admin/export.json", mustBeAdmin, async (req, res) => {
