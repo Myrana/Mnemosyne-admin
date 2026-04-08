@@ -105,6 +105,39 @@ app.use(
   })
 );
 
+// Basic security hardening headers
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  next();
+});
+
+// CSRF protection for all state-changing requests
+function csrfTokenFor(req) {
+  if (!req.session.csrf_token) req.session.csrf_token = crypto.randomBytes(24).toString("hex");
+  return req.session.csrf_token;
+}
+
+function csrfInput(req) {
+  return `<input type="hidden" name="csrf_token" value="${escapeHtml(csrfTokenFor(req))}"/>`;
+}
+
+function mustHaveValidCsrf(req, res, next) {
+  const sent = String(req.body?.csrf_token || "");
+  const expected = String(req.session?.csrf_token || "");
+  if (!sent || !expected || sent !== expected) {
+    return res.status(403).send("Invalid CSRF token. Refresh and try again.");
+  }
+  next();
+}
+
+app.use((req, res, next) => {
+  if (req.method === "POST") return mustHaveValidCsrf(req, res, next);
+  next();
+});
+
 // ---------------- Utilities ----------------
 function escapeHtml(s = "") {
   return String(s)
@@ -505,7 +538,25 @@ function renderPage({ title, user, bodyHtml }) {
   details summary{cursor:pointer; color: var(--link); font-weight:700}
   .spacer{height:10px}
 
-  .footer{
+  .directory-actions{display:flex; gap:8px; flex-wrap:wrap;}
+
+  @media (max-width: 900px){
+    .container{padding:14px;}
+    .topbar{padding:12px 14px;}
+    th, td{font-size:13px; padding:8px;}
+  }
+
+  @media (max-width: 700px){
+    .topbar{flex-direction:column; align-items:flex-start; gap:10px;}
+    .topbar-right{width:100%;}
+    .btn{width:100%;}
+    .directory-table thead{display:none;}
+    .directory-table, .directory-table tbody, .directory-table tr, .directory-table td{display:block; width:100%;}
+    .directory-table tr{border-bottom:1px solid var(--border); padding:10px 0;}
+    .directory-table td{border-bottom:none; padding:5px 0;}
+    .directory-table td::before{content:attr(data-label); display:block; font-size:12px; color:var(--muted); margin-bottom:3px;}
+  }
+    .footer{
     margin:24px 0 10px;
     color: var(--muted);
     font-size:12px;
@@ -680,6 +731,7 @@ app.get("/me/birthdays", mustBeAuthed, async (req, res) => {
       <div class="spacer"></div>
 
       <form method="POST" action="/me/birthdays">
+        ${csrfInput(req)}
         <div class="row">
           <div class="col">
             <label>Character Name</label>
@@ -721,12 +773,14 @@ app.get("/me/birthdays", mustBeAuthed, async (req, res) => {
                   }</td>
                   <td>
                     <form method="POST" action="/me/birthdays/${r.id}/delete" style="display:inline;">
+                      ${csrfInput(req)}
                       <button class="btn danger" type="submit" onclick="return confirm('Delete this birthday?')">Delete</button>
                     </form>
                     <details style="display:inline-block; margin-left:10px;">
                       <summary>Edit</summary>
                       <div class="spacer"></div>
                       <form method="POST" action="/me/birthdays/${r.id}/edit">
+                        ${csrfInput(req)}
                         <div class="row">
                           <div class="col">
                             <label>Name</label>
@@ -882,7 +936,7 @@ app.get("/admin/users", mustBeAdmin, async (req, res) => {
         rows.length
           ? `
         <div style="overflow:auto;">
-          <table>
+          <table class="directory-table">
             <thead><tr><th>User</th><th>User ID</th><th># Birthdays</th><th>Manage</th></tr></thead>
             <tbody>
               ${rows
@@ -896,7 +950,7 @@ app.get("/admin/users", mustBeAdmin, async (req, res) => {
 
                   return `
                     <tr>
-                      <td>
+                      <td data-label="User">
                         <div style="display:flex; align-items:center; gap:10px;">
                           ${
                             avatarUrl
@@ -911,20 +965,22 @@ app.get("/admin/users", mustBeAdmin, async (req, res) => {
                           </div>
                         </div>
                       </td>
-                      <td class="mono">${escapeHtml(r.user_id)}</td>
-                      <td class="mono">${Number(r.birthday_count || 0)}</td>
-                     <td>
+                      <td class="mono" data-label="User ID">${escapeHtml(r.user_id)}</td>
+                      <td class="mono" data-label="# Birthdays">${Number(r.birthday_count || 0)}</td>
+                     <td data-label="Manage">
+                      <div class="directory-actions">
                       <a class="btn" href="/admin/users/${encodeURIComponent(r.user_id)}">Manage</a>
 
                       <form method="POST"
                             action="/admin/users/${encodeURIComponent(r.user_id)}/delete"
                             style="display:inline; margin-left:8px;">
-                        <input type="hidden" name="delete_mapping" value="yes" />
-                        <button class="btn danger" type="submit"
+                        ${csrfInput(req)}
+                                                <button class="btn danger" type="submit"
                           onclick="return confirm('Delete this user? This will delete ALL birthdays for them.');">
                           Delete
                       </button>
                     </form>
+                      </div>
                   </td>
 
                     </tr>
@@ -992,6 +1048,7 @@ app.get("/admin/users/:id", mustBeAdmin, async (req, res) => {
       <div class="spacer"></div>
 
       <form method="POST" action="/admin/users/${encodeURIComponent(targetUserId)}/add">
+        ${csrfInput(req)}
         <div class="row">
           <div class="col">
             <label>Character Name</label>
@@ -1030,8 +1087,10 @@ app.get("/admin/users/:id", mustBeAdmin, async (req, res) => {
                   <td>${r.image_url ? `<a href="${escapeHtml(r.image_url)}" target="_blank" rel="noreferrer">link</a>` : `<span class="muted small">—</span>`}</td>
                   <td>
                     <form method="POST" action="/admin/birthdays/${r.id}/delete" style="display:inline;">
+                    ${csrfInput(req)}
                       <button class="btn danger" type="submit" onclick="return confirm('Admin delete this birthday?')">Delete</button>
                     </form>
+                      </div>
                   </td>
                 </tr>
               `
@@ -1092,7 +1151,7 @@ app.post("/admin/users/:id/delete", mustBeAdmin, async (req, res) => {
     const targetUserId = safeIntStringDiscordId(req.params.id);
     if (!targetUserId) return res.status(400).send("Bad user id");
 
-    const alsoDeleteMapping = req.body.delete_mapping === "yes";
+    const alsoDeleteMapping = true;
 
     const client = await pool.connect();
     try {
@@ -1192,6 +1251,7 @@ app.get("/admin/import", mustBeAdmin, async (req, res) => {
     <div class="card">
       <div class="card-title">Paste JSON</div>
       <form method="POST" action="/admin/import">
+        ${csrfInput(req)}
         <label>JSON backup</label>
         <textarea name="json" rows="16" required placeholder='Paste export.json contents here...'></textarea>
         <div class="spacer"></div>
